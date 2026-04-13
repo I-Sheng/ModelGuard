@@ -284,7 +284,7 @@ curl -s -X POST http://localhost:8000/models/register \
 
 **Failure Indicator**: Objects from a different bucket prefix are returned, or the registration succeeds and creates a key at an unintended path.
 
-**Current Status**: Needs verification
+**Current Status**: FAIL (model_id with path traversal sequences is not validated — registration returns HTTP 500 instead of 400/422; traversal did not succeed in creating objects at unintended paths, but the unhandled error confirms missing input sanitization)
 
 ---
 
@@ -312,7 +312,7 @@ print(r.status_code, r.text[:200])
 
 **Failure Indicator**: Server hangs, returns 500, or stores a 10 MB object in MinIO.
 
-**Current Status**: Needs verification
+**Current Status**: PASS (API responds immediately without crash or hang; stored `query_text` is truncated to 500 chars in MinIO — no 10 MB object written)
 
 ---
 
@@ -343,7 +343,7 @@ curl -s -X POST http://localhost:8000/predict \
 
 **Failure Indicator**: Top-level `risk_level` or `anomaly` values in the response are overridden by the injected values.
 
-**Current Status**: Needs verification
+**Current Status**: PASS (injected `risk_level` and `anomaly` values in metadata did not override the top-level response fields — metadata is stored as a sub-object only)
 
 ---
 
@@ -432,7 +432,7 @@ print(f"Scores: min={min(results):.1f} max={max(results):.1f} avg={sum(results)/
 
 **Failure Indicator**: Scores escalate to HIGH/CRITICAL for the individual requests due to the burst.
 
-**Current Status**: Needs verification
+**Current Status**: FAIL (vulnerability confirmed — 30 concurrent requests with rotating client_id all scored ~62, identical to a single request; the global rate counter is not per-client so the burst is invisibly distributed across identities)
 
 ---
 
@@ -458,7 +458,7 @@ done
 
 **Failure Indicator**: All requests remain LOW regardless of rate.
 
-**Current Status**: Needs verification
+**Current Status**: FAIL (vulnerability confirmed — all 50 burst requests from the same client scored exactly 61.9 with no escalation to CRITICAL; the request_rate_1m feature does not drive score increases across sequential requests)
 
 ---
 
@@ -624,7 +624,7 @@ curl -s -X POST http://localhost:8000/predict \
 
 **Failure Indicator**: HTTP 500 with a stack trace, absolute file path (e.g., `/usr/local/lib/python3.11/...`), or library version exposed in the body.
 
-**Current Status**: Needs verification
+**Current Status**: PASS (all malformed inputs returned structured Pydantic HTTP 422 responses — no Python tracebacks, file paths, or library internals exposed)
 
 ---
 
@@ -676,20 +676,20 @@ docker run --rm --network host minio/mc \
 | ST-B02 | Storage | T-01, T-04 | High | FAIL |
 | ST-B03 | Storage | T-10 | Low–Critical | FAIL |
 | ST-B04 | Storage | T-01, T-05 | High | FAIL |
-| ST-C01 | Injection | T-02 | Medium | Needs verification |
-| ST-C02 | Injection | T-06 | Medium | Needs verification |
-| ST-C03 | Injection | T-02 | Low | Needs verification |
+| ST-C01 | Injection | T-02 | Medium | FAIL |
+| ST-C02 | Injection | T-06 | Medium | PASS |
+| ST-C03 | Injection | T-02 | Low | PASS |
 | ST-D01 | Evasion | T-03, T-07 | High | FAIL |
-| ST-D02 | Evasion | T-07 | Medium | Needs verification |
-| ST-D03 | Evasion | T-03 | Medium | Needs verification |
+| ST-D02 | Evasion | T-07 | Medium | FAIL |
+| ST-D03 | Evasion | T-03 | Medium | FAIL |
 | ST-D04 | Evasion | T-09 | Low | FAIL |
 | ST-E01 | DoS | T-06 | High | FAIL |
 | ST-E02 | DoS | T-06 | Medium | FAIL |
 | ST-F01 | Info Disclosure | T-05 | High | FAIL |
-| ST-F02 | Info Disclosure | T-02 | Low | Needs verification |
+| ST-F02 | Info Disclosure | T-02 | Low | PASS |
 | ST-F03 | Info Disclosure | T-08 | Medium | FAIL |
 
-**Total**: 20 test cases — 13 confirmed FAIL, 4 need verification, 3 need re-run after mitigation.
+**Total**: 20 test cases — 17 confirmed FAIL, 3 PASS.
 
 ---
 
