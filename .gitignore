@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+
+# Docker volumes (if bind-mounted locally)
+minio_data/
+
+# Environment overrides
+.env
+
+# OS
+.DS_Store

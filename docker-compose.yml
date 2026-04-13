@@ -1,0 +1,87 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage
+  # Stores: model artifacts, audit logs, attack reports
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: modelguard-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # MinIO Init — one-shot bucket creation using MinIO Client (mc)
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: modelguard-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+        mc mb --ignore-existing local/modelguard-models &&
+        mc mb --ignore-existing local/modelguard-auditlog &&
+        mc mb --ignore-existing local/modelguard-reports &&
+        echo 'Buckets ready.'
+      "
+
+  # ---------------------------------------------------------------------------
+  # API — FastAPI anomaly detection backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: modelguard-api
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app   # hot-reload in dev
+
+  # ---------------------------------------------------------------------------
+  # Dashboard — Streamlit frontend
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: modelguard-dashboard
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./dashboard:/app   # hot-reload in dev
+
+volumes:
+  minio_data:
+    driver: local

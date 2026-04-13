@@ -1,91 +1,337 @@
-# **Technical Design Document: ModelGuard AI**
+# Technical Design Document: ModelGuard AI
 
 ---
 
-- Status: Initial Architecture / Baseline Release
+- Status: MVP — Baseline Release
 - Version: 0.1.0-oss
 - Repository: I-Sheng/ModelGuard
 
 ---
 
-## **Overview**
+## Overview
 
-**ModelGuard AI** is a real-time detection system for AI model theft attacks. It analyzes incoming API queries against deployed ML models to identify extraction attempts (membership inference, query-based stealing) and data poisoning through behavioral anomaly detection. The system provides risk scores, attack signatures, and automated alerts for enterprise ML teams.
+**ModelGuard AI** is a real-time detection system for AI model theft attacks. It monitors incoming API queries against deployed ML models to identify extraction attempts (membership inference, query-based model stealing) and behavioral anomalies. The system produces risk scores, writes tamper-evident audit logs, and stores dedicated attack reports for high-severity events.
 
-**Core value proposition**: Protects high-value proprietary models (LLMs, vision systems, recommendation engines) from IP theft costing companies $50M+ annually in lost R&D.
+**Core value proposition**: Protects high-value proprietary models (LLMs, vision systems, recommendation engines) from IP theft by sitting in front of model inference endpoints and flagging suspicious query patterns in real time.
 
-## **Motivation**
+---
 
-- **AI model theft exploding**: 2026 sees 300% increase in model extraction attacks as enterprises deploy custom LLMs
-- **Current tools fail**: Traditional WAFs miss model-specific patterns; manual monitoring unscalable
-- **Expertise fit**: Leverages my ML TA experience, LLM knowledge, and security expertise
-- **Market timing**: AI security startups raised $1.2B in Q1 2026; agentic detection is the next wave
+## Motivation
 
-## **Project Components & Requirements**
+- **AI model theft is growing**: Model extraction attacks increase as enterprises deploy custom LLMs and proprietary fine-tunes.
+- **Traditional WAFs miss model-specific patterns**: Query-budget attacks, membership inference, and surrogate model training require ML-aware behavioral analysis.
+- **Low operational overhead**: The MVP runs as a single Docker Compose stack with no external dependencies beyond MinIO.
 
-## **MVP Scope (4 weeks)**
+---
 
-```c
-Core Components:
-├── API Query Monitor (Python/FastAPI)
-│   ├── Query parser & feature extractor
-│   ├── Anomaly detector (Isolation Forest + rules)
-│   └── Risk scoring engine
-├── Streamlit Dashboard
-│   ├── Real-time risk dashboard
-│   ├── Model inventory & attack history
-│   └── Alert configuration
-├── Alerting (Email/Slack)
-└── SQLite persistence (MVP)
+## System Architecture
+
+### Component Map
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Docker Compose Stack                  │
+│                                                         │
+│  ┌──────────────┐    HTTP     ┌─────────────────────┐   │
+│  │  Streamlit   │ ──────────► │   FastAPI + Uvicorn │   │
+│  │  Dashboard   │             │   (port 8000)       │   │
+│  │  (port 8501) │             └────────┬────────────┘   │
+│  └──────────────┘                      │ S3 API          │
+│                                        ▼                 │
+│                              ┌─────────────────────┐    │
+│                              │        MinIO        │    │
+│                              │  S3-compatible      │    │
+│                              │  object storage     │    │
+│                              │  (port 9000/9001)   │    │
+│                              └─────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## **Functional Requirements**
+### MinIO Bucket Layout
 
-1. **Real-time analysis**: <100ms latency per query
-2. **Detection accuracy**: >92% true positive rate on synthetic theft dataset
-3. **Risk scoring**: 0-100 score with confidence intervals
-4. **Dashboard**: Model list, live risk feed, historical attacks
-5. **Alerts**: Configurable thresholds (email/Slack)
+| Bucket | Purpose | Key Pattern |
+|---|---|---|
+| `modelguard-models` | Model metadata + binary artifacts | `{model_id}/metadata.json`, `{model_id}/artifacts/{filename}` |
+| `modelguard-auditlog` | Every query audit record | `{model_id}/{YYYY-MM-DD}/{query_id}.json` |
+| `modelguard-reports` | HIGH/CRITICAL attack reports only | `{model_id}/{query_id}_report.json` |
 
-## **Non-Functional Requirements**
+### Data Flow
 
-- **Scalability**: 1000 queries/second (horizontal scaling via Docker)
-- **Availability**: 99.9% uptime with health checks
-- **Security**: API key auth, rate limiting, audit logging
-- **Observability**: Structured logs, metrics dashboard
+```
+Client Request
+     │
+     ▼
+POST /predict  (or POST /analyze)
+     │
+     ├─ 1. Feature Extraction
+     │       query_length, unique_token_ratio,
+     │       shannon_entropy, request_rate_1m
+     │
+     ├─ 2. Isolation Forest inference
+     │       → anomaly flag (bool)
+     │       → decision_function score → risk score 0–100
+     │       → risk level LOW / MEDIUM / HIGH / CRITICAL
+     │
+     ├─ 3. Store audit record in MinIO (always)
+     │       bucket: modelguard-auditlog
+     │
+     ├─ 4. Store attack report in MinIO (HIGH/CRITICAL only)
+     │       bucket: modelguard-reports  [background task]
+     │
+     └─ 5. Return JSON response to caller
+```
 
-## **Out of Scope (MVP)**
+---
 
-- ❌ Agentic auto-mitigation (block/quarantine)
-- ❌ Multi-tenant support
-- ❌ Advanced ML (transformer-based detectors)
-- ❌ Kubernetes deployment
-- ❌ Enterprise auth (SAML/OIDC)
-- ❌ Compliance (SOC2, GDPR)
+## Technology Stack
 
-## **Practical Technical Decisions**
-
-| **Decision** | **Choice** | **Rationale** |
-| --- | --- | --- |
-| **Backend** | FastAPI + Uvicorn | Async I/O, auto OpenAPI docs, type safety |
-| **Frontend** | React | Transfer from the Figma design |
-| **Database** | SQLite | Simple MVP, scales to prod |
-| **Auth** | API keys (JWT) | Simple enterprise standard |
+| Layer | Choice | Rationale |
+|---|---|---|
+| API framework | FastAPI + Uvicorn | Async I/O, auto OpenAPI docs at `/docs`, Pydantic validation |
+| Anomaly detection | scikit-learn `IsolationForest` | Unsupervised, no labelled attack data required |
+| Object storage | MinIO (S3-compatible) | Self-hosted, no cloud dependency, tamper-evident audit trail |
+| Dashboard | Streamlit | Rapid iteration; sufficient for MVP monitoring UI |
+| Containerisation | Docker Compose | Single-command deployment, service health checks built-in |
+| Data validation | Pydantic v2 | Type-safe request/response models |
+| Numerical | NumPy 1.26 | Feature computation, Isolation Forest input |
 
 **Why NOT:**
+- SQLite for storage: MinIO gives an immutable, path-addressed audit trail and scales to blob storage (model weights) without schema changes.
+- React frontend: Streamlit delivers the required dashboard pages with far less development overhead at MVP stage.
 
-- Flask/Django: Too heavy for microservice
-- Self-hosted: Focus on product, not infra
+---
 
-## **Architecture Diagram (Simplified)**
+## Anomaly Detection Design
 
-![Architecture Diagram](images/Architecture_Diagram.png)
+### Feature Vector (4 dimensions)
 
-**Data Flow:**
+| Feature | Description | Attack Signal |
+|---|---|---|
+| `query_length` | Character count of query text | Extraction queries are typically verbose |
+| `unique_token_ratio` | `unique_tokens / total_tokens` | Systematic probing uses repetitive patterns |
+| `entropy` | Shannon entropy of query characters | Adversarial payloads have distinct entropy profiles |
+| `request_rate_1m` | Queries from this process in the last 60 s | Burst queries indicate automated extraction |
 
-1. Client POSTs to `/predict` → FastAPI extracts features
-2. Isolation Forest flags anomalies → Risk engine scores
-3. WebSocket pushes live updates to dashboard
-4. Threshold breach → Alerting triggers
+### Isolation Forest Configuration
 
-**Deployment:** Single Docker Compose stack (FastAPI + Streamlit + DB)
+```python
+IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+```
+
+Trained at startup on 500 synthetic normal samples drawn from:
+
+```python
+normal ~ N(loc=[120, 0.6, 3.5, 2.0], scale=[40, 0.1, 0.5, 0.8])
+#              query_len  utr   entropy  rate
+```
+
+### Risk Score Mapping
+
+The `decision_function` output (typically `[-0.5, +0.5]`) is mapped to `[0, 100]`:
+
+```
+risk_score = (0.5 - decision_function_score) / 1.0 × 100
+```
+
+| Risk Score | Level | Meaning |
+|---|---|---|
+| 0 – 39 | LOW | Normal query pattern |
+| 40 – 59 | MEDIUM | Mildly anomalous |
+| 60 – 79 | HIGH | Likely extraction attempt; report stored |
+| 80 – 100 | CRITICAL | Strong extraction signal; report stored |
+
+---
+
+## API Reference
+
+Base URL: `http://localhost:8000`  
+Interactive docs: `http://localhost:8000/docs`
+
+### Core Endpoints
+
+#### `POST /predict`
+Run inference against the mock sentiment model **and** apply ModelGuard anomaly detection. Every call is audited.
+
+**Request**
+```json
+{
+  "model_id": "sentiment-v1",
+  "query_text": "I love this product!",
+  "client_id": "user-001",
+  "metadata": {}
+}
+```
+
+**Response**
+```json
+{
+  "query_id": "3f2a1b...",
+  "model_id": "sentiment-v1",
+  "prediction": {
+    "label": "POSITIVE",
+    "confidence": 0.8821,
+    "scores": {"POSITIVE": 0.8821, "NEGATIVE": 0.0634, "NEUTRAL": 0.0545}
+  },
+  "risk_score": 12.5,
+  "risk_level": "LOW",
+  "anomaly": false,
+  "features": {
+    "query_length": 22,
+    "unique_token_ratio": 1.0,
+    "entropy": 4.12,
+    "request_rate_1m": 1
+  },
+  "timestamp": "2026-04-12T10:00:00+00:00",
+  "audit_log_key": "sentiment-v1/2026-04-12/3f2a1b....json"
+}
+```
+
+#### `POST /analyze`
+Analyze any raw query text against a model without invoking a mock inference function. Same anomaly detection pipeline as `/predict`.
+
+**Request** — same shape as `/predict` minus the `prediction` field in the response.
+
+#### `GET /audit/{model_id}`
+List all audit log object keys for a model stored in `modelguard-auditlog`.
+
+Query param: `date=YYYY-MM-DD` (optional filter).
+
+**Response**
+```json
+{
+  "model_id": "sentiment-v1",
+  "audit_logs": [
+    {"key": "sentiment-v1/2026-04-12/abc.json", "size": 512, "last_modified": "..."}
+  ]
+}
+```
+
+#### `GET /reports/{model_id}`
+List all attack report keys for a model stored in `modelguard-reports` (HIGH/CRITICAL events only).
+
+#### `GET /reports/{model_id}/{report_key}`
+Fetch the full JSON content of a specific attack report.
+
+#### `POST /models/register`
+Register a model — stores metadata JSON in `modelguard-models`.
+
+```json
+{
+  "model_id": "sentiment-v1",
+  "name": "Sentiment Classifier",
+  "version": "1.0.0",
+  "description": "Mock sentiment model (POSITIVE/NEGATIVE/NEUTRAL)",
+  "owner": "ml-team"
+}
+```
+
+#### `POST /models/{model_id}/upload`
+Upload a binary model artifact (`.pkl`, `.onnx`, etc.) to MinIO via multipart form.
+
+#### `GET /models/{model_id}`
+Retrieve registered model metadata.
+
+#### `GET /models`
+List all registered model IDs.
+
+#### `GET /health`
+Returns API status, MinIO connectivity, and detector load state.
+
+---
+
+## Mock Model: `sentiment-v1`
+
+A deterministic, rule-based sentiment classifier used for development and demo purposes. It requires no trained weights and produces stable, reproducible outputs for the same input.
+
+**Classes**: `POSITIVE`, `NEGATIVE`, `NEUTRAL`
+
+**Logic**: Scores are derived from positive/negative keyword hit counts, seeded with a hash of the input text for deterministic noise. The output is a label, a confidence score, and a full score dict.
+
+**Registration**:
+```bash
+curl -X POST http://localhost:8000/models/register \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"sentiment-v1","name":"Sentiment Classifier","version":"1.0.0","owner":"ml-team"}'
+```
+
+---
+
+## Historical Data Seeding
+
+`api/seed_history.py` populates MinIO with 60 pre-built records spanning the last 7 days for `sentiment-v1`, providing realistic data for `GET /audit` and `GET /reports` immediately after stack startup.
+
+| Record Type | Count | Risk Levels | Stored As |
+|---|---|---|---|
+| Normal queries | 40 | LOW / MEDIUM | Audit log only |
+| Suspicious queries | 8 | MEDIUM / HIGH | Audit log + report |
+| Attack queries | 12 | HIGH / CRITICAL | Audit log + report |
+
+**Run**:
+```bash
+docker compose exec api python seed_history.py
+```
+
+---
+
+## Dashboard (Streamlit)
+
+URL: `http://localhost:8501`
+
+| Page | Description |
+|---|---|
+| Dashboard | Model count, detection engine status, risk level reference chart |
+| Analyze Query | Submit a query to `/analyze`, view risk score and feature vector |
+| Register Model | Form to register a new model via `/models/register` |
+| Audit Logs | Browse audit log entries per model with optional date filter |
+| Attack Reports | Browse and drill into HIGH/CRITICAL attack reports |
+
+---
+
+## Deployment
+
+### Prerequisites
+- Docker + Docker Compose
+
+### Start
+```bash
+docker compose up -d
+```
+
+Services:
+- `minio` — object storage (port 9000 S3 API, 9001 console)
+- `minio-init` — one-shot bucket creation, exits after success
+- `api` — FastAPI backend (port 8000)
+- `dashboard` — Streamlit frontend (port 8501)
+
+### Seed demo data
+```bash
+docker compose exec api python seed_history.py
+```
+
+### Smoke test
+```bash
+bash demo.sh
+```
+
+### Useful URLs
+
+| URL | Purpose |
+|---|---|
+| `http://localhost:8000/docs` | Interactive API docs (Swagger UI) |
+| `http://localhost:8000/health` | Health check |
+| `http://localhost:8501` | Streamlit dashboard |
+| `http://localhost:9001` | MinIO console (minioadmin / minioadmin) |
+
+---
+
+## Out of Scope (MVP)
+
+- Agentic auto-mitigation (block/quarantine attackers)
+- Multi-tenant support
+- Enterprise auth (API keys, JWT, SAML/OIDC)
+- Rate limiting middleware
+- Transformer-based detectors
+- Kubernetes / Helm deployment
+- Compliance (SOC 2, GDPR)
+- WebSocket live-push to dashboard
+- Email / Slack alerting
