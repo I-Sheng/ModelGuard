@@ -170,21 +170,23 @@ curl -s "http://localhost:8000/reports/sentiment-v1/$KEY" | python3 -m json.tool
 **Threat refs**: T-01  
 **Severity**: Critical
 
-**Objective**: Confirm the default `minioadmin` / `minioadmin` credentials are active and give full access to all buckets.
+**Objective**: Confirm the default `minioadmin` / `minioadmin` credentials are active and give full access to all buckets and their contents via the MinIO web console.
 
 **Steps**:
-```bash
-# Using MinIO Client via Docker (no local install needed)
-docker run --rm --network host minio/mc \
-  alias set local http://localhost:9000 minioadmin minioadmin
+1. Open `http://localhost:9001` in a browser (or an incognito window).
+2. At the MinIO login form, enter:
+   - **Username**: `minioadmin`
+   - **Password**: `minioadmin`
+3. Click **Login**.
+4. In the left sidebar, navigate to **Object Browser**.
+5. Confirm all three buckets are listed: `modelguard-models`, `modelguard-auditlog`, `modelguard-reports`.
+6. Click into `modelguard-models` — browse and open any model object to confirm read access.
+7. Click into `modelguard-auditlog` — drill down through the date-partitioned folders and open any audit log JSON object to confirm full read access.
+8. Click into `modelguard-reports` — browse and open any attack report object to confirm full read access.
 
-docker run --rm --network host minio/mc \
-  ls local/
-```
+**Expected Result (pass — confirms vulnerability)**: Login succeeds with the default credentials, all three buckets are visible, and objects inside each bucket can be read in full. No auth failure or access-denied message is shown.
 
-**Expected Result (pass — confirms vulnerability)**: All three buckets listed (`modelguard-models`, `modelguard-auditlog`, `modelguard-reports`). No auth failure.
-
-**Failure Indicator**: Access denied — credentials have been rotated.
+**Failure Indicator**: Login is rejected — credentials have been rotated and the defaults are no longer valid.
 
 **Current Status**: FAIL (vulnerability confirmed)
 
