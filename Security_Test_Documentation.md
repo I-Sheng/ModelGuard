@@ -200,18 +200,13 @@ curl -s "http://localhost:8000/reports/sentiment-v1/$KEY" | python3 -m json.tool
 **Objective**: Confirm that an attacker with MinIO credentials can delete audit logs, destroying the forensic trail.
 
 **Steps**:
-```bash
-# List objects before deletion
-docker run --rm --network host minio/mc \
-  ls local/modelguard-auditlog/sentiment-v1/ | head -5
-
-# Delete a specific audit log object (use a key from the list above)
-docker run --rm --network host minio/mc \
-  rm "local/modelguard-auditlog/sentiment-v1/$(date +%Y-%m-%d)/$(docker run --rm --network host minio/mc ls local/modelguard-auditlog/sentiment-v1/$(date +%Y-%m-%d)/ 2>/dev/null | head -1 | awk '{print $NF}')"
-
-# Confirm deletion via API
-curl -s "http://localhost:8000/audit/sentiment-v1?date=$(date +%Y-%m-%d)" | python3 -m json.tool
-```
+1. Open `http://localhost:9001` in a browser and log in with `minioadmin` / `minioadmin`.
+2. In the left sidebar, navigate to **Object Browser** → `modelguard-auditlog`.
+3. Drill into `sentiment-v1` → today's date folder and note the objects present.
+4. Select any audit log object using its checkbox.
+5. Click the **Delete** button and confirm the deletion prompt.
+6. Verify the object no longer appears in the folder listing.
+7. Open `http://localhost:8000/audit/sentiment-v1` in a new tab and confirm the deleted entry is absent from the API response.
 
 **Expected Result (pass — confirms vulnerability)**: Object is deleted and no longer appears in the audit log listing.
 
@@ -229,15 +224,12 @@ curl -s "http://localhost:8000/audit/sentiment-v1?date=$(date +%Y-%m-%d)" | pyth
 **Objective**: Confirm MinIO is listening on `0.0.0.0` rather than `127.0.0.1`.
 
 **Steps**:
-```bash
-docker inspect modelguard-minio \
-  --format '{{range .NetworkSettings.Ports}}{{.}}{{end}}'
+1. Open `http://localhost:9001` in a browser and log in with `minioadmin` / `minioadmin`.
+2. In the left sidebar, navigate to **Administrator** → **Configuration**.
+3. Locate the **Server** section and inspect the displayed endpoint address — confirm it shows `0.0.0.0` or a wildcard interface rather than `127.0.0.1`.
+4. As a secondary check, open a second browser tab and navigate to `http://localhost:9000` — if the S3 API responds (XML or JSON error page), the port is publicly reachable.
 
-# Or check from host
-ss -tlnp | grep 9000
-```
-
-**Expected Result (pass — confirms vulnerability)**: Port 9000 is bound to `0.0.0.0` or `:::9000`.
+**Expected Result (pass — confirms vulnerability)**: The console configuration shows `0.0.0.0` as the bound address, and the S3 port at 9000 responds from the browser.
 
 **Failure Indicator**: Port is bound to `127.0.0.1:9000` only.
 
@@ -253,11 +245,11 @@ ss -tlnp | grep 9000
 **Objective**: Confirm that the MinIO web console (port 9001) is reachable and presents only its own login form — no network-layer auth in front of it.
 
 **Steps**:
-```bash
-curl -s -o /dev/null -w "%{http_code}" http://localhost:9001/
-```
+1. Open a fresh incognito/private browser window to ensure no cached session is used.
+2. Navigate to `http://localhost:9001`.
+3. Observe whether the page loads and what is displayed.
 
-**Expected Result (pass — confirms vulnerability)**: HTTP 200 or 302. The console login page is served with no network-level block.
+**Expected Result (pass — confirms vulnerability)**: The MinIO login form loads immediately with no prior network-level block, firewall challenge, or VPN gate.
 
 **Failure Indicator**: HTTP 403 or connection refused.
 
