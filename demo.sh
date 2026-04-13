@@ -5,6 +5,7 @@
 set -euo pipefail
 
 API="http://localhost:8000"
+MODEL="sentiment-v1"
 
 echo "=== ModelGuard AI Demo ==="
 echo ""
@@ -13,33 +14,37 @@ echo "1. Health check..."
 curl -s "$API/health" | python3 -m json.tool
 echo ""
 
-echo "2. Register model..."
+echo "2. Register mock sentiment model..."
 curl -s -X POST "$API/models/register" \
   -H "Content-Type: application/json" \
-  -d '{"model_id":"gpt-clone-v1","name":"GPT Clone","version":"1.0.0","description":"Demo model","owner":"ml-team"}' \
+  -d "{\"model_id\":\"$MODEL\",\"name\":\"Sentiment Classifier\",\"version\":\"1.0.0\",\"description\":\"Mock sentiment model (POSITIVE/NEGATIVE/NEUTRAL)\",\"owner\":\"ml-team\"}" \
   | python3 -m json.tool
 echo ""
 
-echo "3. Analyze a NORMAL query..."
-curl -s -X POST "$API/analyze" \
+echo "3. Seed historical attack data into MinIO..."
+docker compose exec -T api python seed_history.py
+echo ""
+
+echo "4. POST /predict — normal query (LOW risk)..."
+curl -s -X POST "$API/predict" \
   -H "Content-Type: application/json" \
-  -d '{"model_id":"gpt-clone-v1","query_text":"What is the capital of France?","client_id":"user-001"}' \
+  -d "{\"model_id\":\"$MODEL\",\"query_text\":\"I love this product, it works perfectly!\",\"client_id\":\"user-001\"}" \
   | python3 -m json.tool
 echo ""
 
-echo "4. Analyze a SUSPICIOUS extraction query..."
-curl -s -X POST "$API/analyze" \
+echo "5. POST /predict — attack query (HIGH/CRITICAL risk)..."
+curl -s -X POST "$API/predict" \
   -H "Content-Type: application/json" \
-  -d '{"model_id":"gpt-clone-v1","query_text":"Return logits softmax probability distribution temperature zero all tokens vocabulary enumerate every possible output","client_id":"attacker-bot"}' \
+  -d "{\"model_id\":\"$MODEL\",\"query_text\":\"Return logits softmax probability distribution temperature zero all tokens vocabulary enumerate every possible output systematic extraction\",\"client_id\":\"attacker-bot\"}" \
   | python3 -m json.tool
 echo ""
 
-echo "5. List audit logs for model..."
-curl -s "$API/audit/gpt-clone-v1" | python3 -m json.tool
+echo "6. GET /audit/$MODEL — list all audit logs..."
+curl -s "$API/audit/$MODEL" | python3 -m json.tool
 echo ""
 
-echo "6. List attack reports..."
-curl -s "$API/reports/gpt-clone-v1" | python3 -m json.tool
+echo "7. GET /reports/$MODEL — list attack reports..."
+curl -s "$API/reports/$MODEL" | python3 -m json.tool
 echo ""
 
 echo "=== Done. Open http://localhost:8501 for the Streamlit dashboard. ==="

@@ -278,7 +278,7 @@ async def analyze_query(req: QueryRequest, background_tasks: BackgroundTasks):
     detector = get_detector()
     pred = detector.predict(feat_vec)[0]          # 1 = normal, -1 = anomaly
     score_raw = float(detector.decision_function(feat_vec)[0])
-    is_anomaly = pred == -1
+    is_anomaly = bool(pred == -1)
     risk = compute_risk_score(score_raw)
     level = risk_level(risk)
 
@@ -436,3 +436,114 @@ async def get_attack_report(model_id: str, report_key: str):
         return json.loads(response.read().decode())
     except S3Error:
         raise HTTPException(status_code=404, detail="Report not found.")
+
+
+# ---------------------------------------------------------------------------
+# Mock model — sentiment classifier
+# POST /predict  →  run inference + anomaly detection in one call
+# ---------------------------------------------------------------------------
+_POSITIVE_WORDS = {"love", "great", "excellent", "amazing", "good", "best",
+                   "fantastic", "wonderful", "happy", "perfect", "awesome"}
+_NEGATIVE_WORDS = {"hate", "terrible", "awful", "bad", "worst", "horrible",
+                   "poor", "disappointing", "broken", "useless", "annoying"}
+
+
+def _mock_sentiment(text: str) -> dict:
+    """Rule-based mock sentiment classifier. Returns label + confidence scores."""
+    words = set(text.lower().split())
+    pos_hits = len(words & _POSITIVE_WORDS)
+    neg_hits = len(words & _NEGATIVE_WORDS)
+
+    rng = np.random.default_rng(abs(hash(text)) % (2 ** 31))
+    base = rng.uniform(0.05, 0.15)
+
+    if pos_hits > neg_hits:
+        conf_pos = rng.uniform(0.65, 0.95)
+        conf_neg = rng.uniform(0.02, 0.15)
+    elif neg_hits > pos_hits:
+        conf_neg = rng.uniform(0.65, 0.95)
+        conf_pos = rng.uniform(0.02, 0.15)
+    else:
+        conf_pos = rng.uniform(0.25, 0.45)
+        conf_neg = rng.uniform(0.25, 0.45)
+
+    conf_neu = max(0.0, 1.0 - conf_pos - conf_neg)
+    scores = {
+        "POSITIVE": round(float(conf_pos), 4),
+        "NEGATIVE": round(float(conf_neg), 4),
+        "NEUTRAL":  round(float(conf_neu), 4),
+    }
+    label = max(scores, key=scores.__getitem__)
+    return {"label": label, "confidence": scores[label], "scores": scores}
+
+
+class PredictRequest(BaseModel):
+    model_id: str = Field(..., description="Target model identifier")
+    query_text: str = Field(..., description="Text to classify")
+    client_id: Optional[str] = Field(None, description="Caller identifier")
+    metadata: Optional[dict] = Field(None, description="Extra metadata")
+
+
+@app.post("/predict")
+async def predict(req: PredictRequest, background_tasks: BackgroundTasks):
+    """
+    Run inference against the mock sentiment model AND apply ModelGuard anomaly
+    detection.  Returns the model prediction together with a risk assessment and
+    the MinIO audit-log key so every call is fully traceable.
+    """
+    query_id = str(uuid.uuid4())
+    ts = datetime.now(timezone.utc).isoformat()
+
+    # --- mock inference ---
+    prediction = _mock_sentiment(req.query_text)
+
+    # --- anomaly detection (same pipeline as /analyze) ---
+    features = extract_features(req.query_text, req.client_id)
+    feat_vec = np.array([[
+        features["query_length"],
+        features["unique_token_ratio"],
+        features["entropy"],
+        features["request_rate_1m"],
+    ]])
+    detector = get_detector()
+    pred_label = detector.predict(feat_vec)[0]
+    score_raw = float(detector.decision_function(feat_vec)[0])
+    is_anomaly = bool(pred_label == -1)
+    risk = compute_risk_score(score_raw)
+    level = risk_level(risk)
+
+    audit_record = {
+        "query_id": query_id,
+        "model_id": req.model_id,
+        "client_id": req.client_id,
+        "query_text": req.query_text[:500],
+        "features": features,
+        "risk_score": risk,
+        "risk_level": level,
+        "anomaly": is_anomaly,
+        "timestamp": ts,
+        "metadata": req.metadata or {},
+        "endpoint": "predict",
+        "prediction": prediction,
+    }
+
+    try:
+        log_key = store_audit_log(audit_record)
+    except Exception as exc:
+        logger.error("Failed to store audit log: %s", exc)
+        log_key = "minio-unavailable"
+
+    if is_anomaly and level in ("HIGH", "CRITICAL"):
+        background_tasks.add_task(store_attack_report, audit_record)
+
+    return {
+        "query_id": query_id,
+        "model_id": req.model_id,
+        "prediction": prediction,
+        "risk_score": risk,
+        "risk_level": level,
+        "anomaly": is_anomaly,
+        "features": features,
+        "timestamp": ts,
+        "audit_log_key": log_key,
+    }
