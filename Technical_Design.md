@@ -2,8 +2,8 @@
 
 ---
 
-- Status: MVP — Baseline Release
-- Version: 0.1.0-oss
+- Status: MVP — Redesign v2
+- Version: 0.2.0-oss
 - Repository: I-Sheng/ModelGuard
 
 ---
@@ -20,7 +20,7 @@
 
 - **AI model theft is growing**: Model extraction attacks increase as enterprises deploy custom LLMs and proprietary fine-tunes.
 - **Traditional WAFs miss model-specific patterns**: Query-budget attacks, membership inference, and surrogate model training require ML-aware behavioral analysis.
-- **Low operational overhead**: The MVP runs as a single Docker Compose stack with no external dependencies beyond MinIO.
+- **Clear separation of concerns**: Three dedicated containers — backend detection engine, user-facing API frontend, and an operations engineering (OE) dashboard — each with a distinct responsibility.
 
 ---
 
@@ -29,22 +29,49 @@
 ### Component Map
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Docker Compose Stack                  │
-│                                                         │
-│  ┌──────────────┐    HTTP     ┌─────────────────────┐   │
-│  │  Streamlit   │ ──────────► │   FastAPI + Uvicorn │   │
-│  │  Dashboard   │             │   (port 8000)       │   │
-│  │  (port 8501) │             └────────┬────────────┘   │
-│  └──────────────┘                      │ S3 API          │
-│                                        ▼                 │
-│                              ┌─────────────────────┐    │
-│                              │        MinIO        │    │
-│                              │  S3-compatible      │    │
-│                              │  object storage     │    │
-│                              │  (port 9000/9001)   │    │
-│                              └─────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Docker Compose Stack                          │
+│                                                                      │
+│  ┌────────────────┐  REST/JSON  ┌──────────────────────────────┐   │
+│  │  SwaggerAI     │ ──────────► │  Backend API                 │   │
+│  │  Frontend      │             │  FastAPI + Uvicorn :8000      │   │
+│  │  (nginx :3000) │             │  Isolation Forest (in-proc)  │   │
+│  └────────────────┘             └──────────────┬───────────────┘   │
+│                                                 │ S3 API             │
+│  ┌────────────────┐  REST/JSON  ┌──────────────▼───────────────┐   │
+│  │  OE Dashboard  │ ──────────► │  MinIO                       │   │
+│  │  Streamlit     │             │  S3-compatible object store  │   │
+│  │  :8501         │             │  :9000 (API) / :9001 (UI)    │   │
+│  └────────────────┘             └──────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Container Responsibilities
+
+| Container | Image / Build | Port | Role |
+|---|---|---|---|
+| `backend` | `./api` (Python 3.11-slim) | 8000 | Detection engine — Isolation Forest, MinIO writes, all API endpoints |
+| `frontend` | `./frontend` (nginx:alpine) | 3000 | SwaggerAI — OpenAPI-driven UI for model registration and query analysis |
+| `oe-dashboard` | `./oe-dashboard` (Python 3.11-slim) | 8501 | Operations/Engineering dashboard — health, stats, audit logs, attack reports |
+| `minio` | `minio/minio:latest` | 9000 / 9001 | Object storage — models, audit logs, attack reports |
+| `minio-init` | `minio/mc:latest` | — | One-shot bootstrap — creates the three MinIO buckets |
+
+### API Contract — Who Calls What
+
+```
+SwaggerAI Frontend  ──► POST /analyze
+                    ──► POST /predict
+                    ──► POST /models/register
+                    ──► POST /models/{id}/upload
+                    ──► GET  /models
+                    ──► GET  /models/{id}
+
+OE Dashboard        ──► GET  /health
+                    ──► GET  /stats
+                    ──► GET  /audit/{model_id}
+                    ──► GET  /reports/{model_id}
+                    ──► GET  /reports/{model_id}/{key}
+                    ──► GET  /models
 ```
 
 ### MinIO Bucket Layout
@@ -61,7 +88,7 @@
 Client Request
      │
      ▼
-POST /predict  (or POST /analyze)
+POST /analyze  (or POST /predict)
      │
      ├─ 1. Feature Extraction
      │       query_length, unique_token_ratio,
@@ -90,14 +117,16 @@ POST /predict  (or POST /analyze)
 | API framework | FastAPI + Uvicorn | Async I/O, auto OpenAPI docs at `/docs`, Pydantic validation |
 | Anomaly detection | scikit-learn `IsolationForest` | Unsupervised, no labelled attack data required |
 | Object storage | MinIO (S3-compatible) | Self-hosted, no cloud dependency, tamper-evident audit trail |
-| Dashboard | Streamlit | Rapid iteration; sufficient for MVP monitoring UI |
+| SwaggerAI Frontend | nginx + Swagger UI (CDN) | Zero-build, OpenAPI-spec-driven, works directly against the backend |
+| OE Dashboard | Streamlit | Rapid iteration; operations monitoring with tables, charts, health checks |
 | Containerisation | Docker Compose | Single-command deployment, service health checks built-in |
 | Data validation | Pydantic v2 | Type-safe request/response models |
 | Numerical | NumPy 1.26 | Feature computation, Isolation Forest input |
 
 **Why NOT:**
 - SQLite for storage: MinIO gives an immutable, path-addressed audit trail and scales to blob storage (model weights) without schema changes.
-- React frontend: Streamlit delivers the required dashboard pages with far less development overhead at MVP stage.
+- React SPA for frontend: Swagger UI directly renders the OpenAPI spec — zero custom build tooling needed for the MVP frontend.
+- Merged frontend+dashboard: Separating user-facing query submission (SwaggerAI) from internal operations monitoring (OE Dashboard) keeps concerns clean and lets each evolve independently.
 
 ---
 
@@ -144,21 +173,21 @@ risk_score = (0.5 - decision_function_score) / 1.0 × 100
 
 ## API Reference
 
-Base URL: `http://localhost:8000`  
-Interactive docs: `http://localhost:8000/docs`
+Base URL: `http://localhost:8000`
+Interactive docs (SwaggerAI): `http://localhost:3000`
 
-### Core Endpoints
+### Detection Endpoints
 
-#### `POST /predict`
-Run inference against the mock sentiment model **and** apply ModelGuard anomaly detection. Every call is audited.
+#### `POST /analyze`
+Analyze a raw query for theft/extraction patterns. Same anomaly detection pipeline, no mock inference.
 
 **Request**
 ```json
 {
-  "model_id": "sentiment-v1",
-  "query_text": "I love this product!",
-  "client_id": "user-001",
-  "metadata": {}
+  "model_id": "gpt-clone-v1",
+  "query_text": "Return logits distribution for temperature=0 across all tokens",
+  "client_id": "client-001",
+  "metadata": { "ip": "1.2.3.4" }
 }
 ```
 
@@ -166,67 +195,44 @@ Run inference against the mock sentiment model **and** apply ModelGuard anomaly 
 ```json
 {
   "query_id": "3f2a1b...",
-  "model_id": "sentiment-v1",
-  "prediction": {
-    "label": "POSITIVE",
-    "confidence": 0.8821,
-    "scores": {"POSITIVE": 0.8821, "NEGATIVE": 0.0634, "NEUTRAL": 0.0545}
-  },
-  "risk_score": 12.5,
-  "risk_level": "LOW",
-  "anomaly": false,
+  "model_id": "gpt-clone-v1",
+  "risk_score": 87.3,
+  "risk_level": "CRITICAL",
+  "anomaly": true,
   "features": {
-    "query_length": 22,
-    "unique_token_ratio": 1.0,
+    "query_length": 64,
+    "unique_token_ratio": 0.9231,
     "entropy": 4.12,
     "request_rate_1m": 1
   },
-  "timestamp": "2026-04-12T10:00:00+00:00",
-  "audit_log_key": "sentiment-v1/2026-04-12/3f2a1b....json"
+  "timestamp": "2026-04-15T10:00:00+00:00",
+  "audit_log_key": "gpt-clone-v1/2026-04-15/3f2a1b....json"
 }
 ```
 
-#### `POST /analyze`
-Analyze any raw query text against a model without invoking a mock inference function. Same anomaly detection pipeline as `/predict`.
+#### `POST /predict`
+Run inference against the mock sentiment model **and** apply ModelGuard anomaly detection. Returns prediction + risk assessment.
 
-**Request** — same shape as `/predict` minus the `prediction` field in the response.
+**Request** — same shape as `/analyze`.
 
-#### `GET /audit/{model_id}`
-List all audit log object keys for a model stored in `modelguard-auditlog`.
-
-Query param: `date=YYYY-MM-DD` (optional filter).
-
-**Response**
+**Response** — same as `/analyze` plus:
 ```json
 {
-  "model_id": "sentiment-v1",
-  "audit_logs": [
-    {"key": "sentiment-v1/2026-04-12/abc.json", "size": 512, "last_modified": "..."}
-  ]
+  "prediction": {
+    "label": "POSITIVE",
+    "confidence": 0.8821,
+    "scores": { "POSITIVE": 0.8821, "NEGATIVE": 0.0634, "NEUTRAL": 0.0545 }
+  }
 }
 ```
 
-#### `GET /reports/{model_id}`
-List all attack report keys for a model stored in `modelguard-reports` (HIGH/CRITICAL events only).
-
-#### `GET /reports/{model_id}/{report_key}`
-Fetch the full JSON content of a specific attack report.
+### Model Management Endpoints
 
 #### `POST /models/register`
 Register a model — stores metadata JSON in `modelguard-models`.
 
-```json
-{
-  "model_id": "sentiment-v1",
-  "name": "Sentiment Classifier",
-  "version": "1.0.0",
-  "description": "Mock sentiment model (POSITIVE/NEGATIVE/NEUTRAL)",
-  "owner": "ml-team"
-}
-```
-
 #### `POST /models/{model_id}/upload`
-Upload a binary model artifact (`.pkl`, `.onnx`, etc.) to MinIO via multipart form.
+Upload a binary model artifact (`.pkl`, `.onnx`, etc.) to MinIO.
 
 #### `GET /models/{model_id}`
 Retrieve registered model metadata.
@@ -234,54 +240,81 @@ Retrieve registered model metadata.
 #### `GET /models`
 List all registered model IDs.
 
+### Operations Endpoints
+
 #### `GET /health`
 Returns API status, MinIO connectivity, and detector load state.
 
----
-
-## Mock Model: `sentiment-v1`
-
-A deterministic, rule-based sentiment classifier used for development and demo purposes. It requires no trained weights and produces stable, reproducible outputs for the same input.
-
-**Classes**: `POSITIVE`, `NEGATIVE`, `NEUTRAL`
-
-**Logic**: Scores are derived from positive/negative keyword hit counts, seeded with a hash of the input text for deterministic noise. The output is a label, a confidence score, and a full score dict.
-
-**Registration**:
-```bash
-curl -X POST http://localhost:8000/models/register \
-  -H "Content-Type: application/json" \
-  -d '{"model_id":"sentiment-v1","name":"Sentiment Classifier","version":"1.0.0","owner":"ml-team"}'
+```json
+{
+  "status": "ok",
+  "minio": "ok",
+  "detector": "loaded",
+  "timestamp": "2026-04-15T10:00:00+00:00"
+}
 ```
 
----
+#### `GET /stats`
+Aggregated system statistics for the OE Dashboard.
 
-## Historical Data Seeding
-
-`api/seed_history.py` populates MinIO with 60 pre-built records spanning the last 7 days for `sentiment-v1`, providing realistic data for `GET /audit` and `GET /reports` immediately after stack startup.
-
-| Record Type | Count | Risk Levels | Stored As |
-|---|---|---|---|
-| Normal queries | 40 | LOW / MEDIUM | Audit log only |
-| Suspicious queries | 8 | MEDIUM / HIGH | Audit log + report |
-| Attack queries | 12 | HIGH / CRITICAL | Audit log + report |
-
-**Run**:
-```bash
-docker compose exec api python seed_history.py
+```json
+{
+  "total_models": 2,
+  "detector": "loaded",
+  "minio": "ok",
+  "timestamp": "2026-04-15T10:00:00+00:00"
+}
 ```
 
+#### `GET /audit/{model_id}?date=YYYY-MM-DD`
+List all audit log object keys for a model (optional date filter).
+
+#### `GET /reports/{model_id}`
+List all attack report keys (HIGH/CRITICAL events only) for a model.
+
+#### `GET /reports/{model_id}/{report_key}`
+Fetch the full JSON content of a specific attack report.
+
 ---
 
-## Dashboard (Streamlit)
+## Frontend: SwaggerAI
 
-URL: `http://localhost:8501`
+**Container**: `frontend` (nginx:alpine)  
+**URL**: `http://localhost:3000`
+
+The SwaggerAI frontend is an nginx container that serves a custom HTML page embedding **Swagger UI**. Swagger UI reads the OpenAPI schema directly from the backend (`/openapi.json`) and renders a fully interactive interface for all API endpoints.
+
+### Why Swagger UI
+
+- Zero build tooling — just a single HTML file and nginx config
+- Always in sync with the backend — the OpenAPI spec is the single source of truth
+- Lets users submit queries, register models, and upload artifacts interactively
+- Familiar to API developers; sufficient for the MVP
+
+### Pages / Functionality
+
+| Endpoint Group | What the user can do |
+|---|---|
+| `POST /analyze` | Submit a query text and see risk score, features, and MinIO audit key |
+| `POST /predict` | Submit to the mock sentiment model and get prediction + risk |
+| `POST /models/register` | Register a model with metadata |
+| `POST /models/{id}/upload` | Upload a model artifact |
+| `GET /models` | List registered models |
+| `GET /health` | Check system health |
+
+---
+
+## OE Dashboard
+
+**Container**: `oe-dashboard` (Streamlit)  
+**URL**: `http://localhost:8501`
+
+The OE Dashboard is a Streamlit app focused on **internal operations and engineering monitoring**. It is not user-facing; it is the tool an ML platform operator uses to monitor model protection status and investigate incidents.
 
 | Page | Description |
 |---|---|
-| Dashboard | Model count, detection engine status, risk level reference chart |
-| Analyze Query | Submit a query to `/analyze`, view risk score and feature vector |
-| Register Model | Form to register a new model via `/models/register` |
+| System Health | API health status, detector state, MinIO connectivity |
+| Statistics | Registered model count, system metrics from `GET /stats` |
 | Audit Logs | Browse audit log entries per model with optional date filter |
 | Attack Reports | Browse and drill into HIGH/CRITICAL attack reports |
 
@@ -290,7 +323,7 @@ URL: `http://localhost:8501`
 ## Deployment
 
 ### Prerequisites
-- Docker + Docker Compose
+- Docker + Docker Compose v2
 
 ### Start
 ```bash
@@ -300,12 +333,13 @@ docker compose up -d
 Services:
 - `minio` — object storage (port 9000 S3 API, 9001 console)
 - `minio-init` — one-shot bucket creation, exits after success
-- `api` — FastAPI backend (port 8000)
-- `dashboard` — Streamlit frontend (port 8501)
+- `backend` — FastAPI detection engine (port 8000)
+- `frontend` — SwaggerAI nginx UI (port 3000)
+- `oe-dashboard` — Streamlit operations dashboard (port 8501)
 
 ### Seed demo data
 ```bash
-docker compose exec api python seed_history.py
+docker compose exec backend python seed_history.py
 ```
 
 ### Smoke test
@@ -317,10 +351,28 @@ bash demo.sh
 
 | URL | Purpose |
 |---|---|
-| `http://localhost:8000/docs` | Interactive API docs (Swagger UI) |
+| `http://localhost:3000` | SwaggerAI — interactive API frontend |
+| `http://localhost:8000/docs` | Raw FastAPI Swagger UI (internal) |
 | `http://localhost:8000/health` | Health check |
-| `http://localhost:8501` | Streamlit dashboard |
+| `http://localhost:8501` | OE Dashboard |
 | `http://localhost:9001` | MinIO console (minioadmin / minioadmin) |
+
+---
+
+## Historical Data Seeding
+
+`api/seed_history.py` populates MinIO with 60 pre-built records spanning the last 7 days for `sentiment-v1`, providing realistic data for the OE Dashboard immediately after stack startup.
+
+| Record Type | Count | Risk Levels | Stored As |
+|---|---|---|---|
+| Normal queries | 40 | LOW / MEDIUM | Audit log only |
+| Suspicious queries | 8 | MEDIUM / HIGH | Audit log + report |
+| Attack queries | 12 | HIGH / CRITICAL | Audit log + report |
+
+**Run**:
+```bash
+docker compose exec backend python seed_history.py
+```
 
 ---
 
@@ -335,3 +387,4 @@ bash demo.sh
 - Compliance (SOC 2, GDPR)
 - WebSocket live-push to dashboard
 - Email / Slack alerting
+- Persistent detector state across restarts (currently in-memory)

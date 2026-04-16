@@ -2,22 +2,23 @@
 
 ---
 
-- Status: MVP
-- Version: 0.1.0-oss
+- Status: MVP — Redesign v2
+- Version: 0.2.0-oss
 - Repository: I-Sheng/ModelGuard
-- Last Updated: 2026-04-12
+- Last Updated: 2026-04-15
 
 ---
 
 ## 1. Scope and Objectives
 
-This document covers the threat surface of the ModelGuard AI stack as deployed via Docker Compose: the FastAPI backend, Streamlit dashboard, and MinIO object storage. It identifies assets worth protecting, trust boundaries, threat actors, concrete attack scenarios (using STRIDE), and the current mitigation status of each.
+This document covers the threat surface of the ModelGuard AI stack as deployed via Docker Compose: the FastAPI backend, SwaggerAI frontend, OE Dashboard, and MinIO object storage. It identifies assets worth protecting, trust boundaries, threat actors, concrete attack scenarios (using STRIDE), and the current mitigation status of each.
 
 **What is in scope:**
-- The API (port 8000) and all its endpoints
+- The Backend API (port 8000) and all its endpoints
 - MinIO storage and the three buckets it hosts
 - The Isolation Forest detection engine
-- The Streamlit dashboard (port 8501)
+- The SwaggerAI frontend (port 3000, nginx)
+- The OE Dashboard (port 8501, Streamlit)
 - Docker Compose network configuration
 
 **What is out of scope:**
@@ -44,32 +45,40 @@ This document covers the threat surface of the ModelGuard AI stack as deployed v
 ## 3. Trust Boundaries
 
 ```
-[ Internet / Untrusted Clients ]
+[ External Users / Clients ]
            │
-           │  HTTP (port 8000)        ← Trust boundary 1: no auth
+           │  HTTP (port 3000)        ← Trust boundary 1: no auth (SwaggerAI nginx)
            ▼
-  ┌─────────────────────┐
-  │   FastAPI API       │
-  │   (modelguard-api)  │
-  └────────┬────────────┘
-           │  S3 API (Docker internal network)
-           │                          ← Trust boundary 2: shared static credentials
-           ▼
-  ┌─────────────────────┐
-  │      MinIO          │
-  │ (modelguard-minio)  │◄─── HTTP (port 9001) ← Trust boundary 3: console exposed
-  └─────────────────────┘
+  ┌──────────────────────┐
+  │  SwaggerAI Frontend  │─────► Backend API (Docker internal)
+  │  (modelguard-frontend│
+  └──────────────────────┘
 
-[ Dashboard Users ]
+[ Operator / Internal Users ]
            │
-           │  HTTP (port 8501)        ← Trust boundary 4: no auth
+           │  HTTP (port 8501)        ← Trust boundary 2: no auth (OE Dashboard)
            ▼
-  ┌─────────────────────┐
-  │ Streamlit Dashboard │─────► API (Docker internal)
-  └─────────────────────┘
+  ┌──────────────────────┐
+  │   OE Dashboard       │─────► Backend API (Docker internal)
+  │ (modelguard-oe-dash) │
+  └──────────────────────┘
+
+           │  HTTP (port 8000)        ← Trust boundary 3: direct access (no auth)
+           ▼
+  ┌──────────────────────┐
+  │   Backend API        │
+  │ (modelguard-backend) │
+  └────────┬─────────────┘
+           │  S3 API (Docker internal network)
+           │                          ← Trust boundary 4: shared static credentials
+           ▼
+  ┌──────────────────────┐
+  │      MinIO           │
+  │ (modelguard-minio)   │◄─── HTTP (port 9001) ← Trust boundary 5: console exposed
+  └──────────────────────┘
 ```
 
-**Key observation**: All four trust boundaries currently lack authentication. Any process that can reach port 8000 or 8501 has full access to all API operations. Any process that can reach port 9000/9001 with the default credentials has full storage access.
+**Key observation**: All five trust boundaries currently lack authentication. Any process that can reach port 3000, 8000, or 8501 has full access to all API operations. Any process that can reach port 9000/9001 with the default credentials has full storage access.
 
 ---
 
@@ -118,13 +127,21 @@ This document covers the threat surface of the ModelGuard AI stack as deployed v
 | **I**nformation Disclosure | The `decision_function` raw score is not returned in the API response, but the `risk_score` (a linear transform of it) is. An attacker can use binary search over query variants to characterise the decision boundary. | Risk score exposed | Medium |
 | **D**enial of Service | The detector is loaded once at startup. If it raises an exception during `.predict()`, the entire request fails. No fallback scoring path exists. | No fallback | Low |
 
-### 5.4 Streamlit Dashboard
+### 5.4 SwaggerAI Frontend (nginx, port 3000)
 
 | Threat | Description | Current State | Severity |
 |---|---|---|---|
-| **S**poofing | No authentication on port 8501. Anyone who can reach it sees all models, audit logs, and attack reports. | No auth | High |
-| **I**nformation Disclosure | Attack report detail view renders the full stored JSON, which includes the raw query text. If queries contain PII, it is displayed in the browser. | No masking in UI | Medium |
-| **D**enial of Service | The "Fetch Logs" button issues an unbounded `list_objects` call. A bucket with millions of entries will hang the dashboard. | No pagination | Low |
+| **S**poofing | No authentication on port 3000. Any user who can reach it can submit queries, register models, and upload artifacts. | No auth | High |
+| **T**ampering | nginx proxies requests to the backend at `/api/*`. A misconfigured proxy rule could expose internal backend paths or allow SSRF. | Proxy config is minimal | Low |
+| **I**nformation Disclosure | Swagger UI renders all response bodies including `query_text` snippets returned in error responses. PII in queries is visible in the browser. | No masking | Medium |
+
+### 5.5 OE Dashboard (Streamlit, port 8501)
+
+| Threat | Description | Current State | Severity |
+|---|---|---|---|
+| **S**poofing | No authentication on port 8501. Anyone who can reach it sees all audit logs and attack reports. | No auth | High |
+| **I**nformation Disclosure | Attack report detail view renders the full stored JSON, which includes raw query text. If queries contain PII, it is displayed in the browser. | No masking in UI | Medium |
+| **D**enial of Service | The "Fetch Audit Logs" button issues an unbounded `list_objects` call. A bucket with millions of entries will hang the dashboard. | No pagination | Low |
 
 ---
 
@@ -202,7 +219,8 @@ This document covers the threat surface of the ModelGuard AI stack as deployed v
 | T-02 | No API authentication | High | High | **Critical** | Open |
 | T-03 | Evasion via feature-aware query crafting | Medium | High | **High** | Open |
 | T-04 | Audit log deletion (no object lock) | Medium | High | **High** | Open |
-| T-05 | Dashboard unauthenticated | High | Medium | **High** | Open |
+| T-05 | SwaggerAI frontend unauthenticated | High | High | **High** | Open |
+| T-05b | OE Dashboard unauthenticated | High | Medium | **High** | Open |
 | T-06 | Storage exhaustion DoS | Medium | Medium | **Medium** | Open |
 | T-07 | Per-client rate evasion | High | Medium | **Medium** | Open |
 | T-08 | PII in stored query text | Medium | Medium | **Medium** | Open |
@@ -220,7 +238,7 @@ This document covers the threat surface of the ModelGuard AI stack as deployed v
 | M-01 | T-01 | Rotate MinIO credentials; inject via `.env` file excluded from git; never use `minioadmin` in any non-local environment |
 | M-02 | T-02 | Add API key middleware to FastAPI (static key via `X-API-Key` header as a minimum; JWT for multi-tenant) |
 | M-03 | T-10 | Bind MinIO ports to `127.0.0.1` in `docker-compose.yml`; expose only the API port externally |
-| M-04 | T-05 | Add Streamlit authentication (st.experimental_user or a reverse proxy with basic auth) |
+| M-04 | T-05, T-05b | Add authentication to both frontends: API key header for SwaggerAI requests; Streamlit reverse-proxy basic auth or `st.experimental_user` for OE Dashboard |
 
 ### Short-term
 
@@ -246,7 +264,7 @@ This document covers the threat surface of the ModelGuard AI stack as deployed v
 
 The following assumptions bound the current threat model. Violations would invalidate the risk ratings above.
 
-1. **Deployment is internal only.** Ports 8000, 8501, 9000, and 9001 are not reachable from the public internet.
+1. **Deployment is internal only.** Ports 3000, 8000, 8501, 9000, and 9001 are not reachable from the public internet.
 2. **The Docker host is trusted.** Host-level compromise is out of scope.
 3. **Source code is public.** The feature vector, training distribution, and detection logic are known to any attacker who reads the repository.
 4. **Queries are not legally sensitive.** No PII, health, or financial data is expected in `query_text` at MVP stage.

@@ -130,6 +130,13 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class StatsResponse(BaseModel):
+    total_models: int
+    detector: str
+    minio: str
+    timestamp: str
+
+
 class ModelRegistration(BaseModel):
     model_id: str
     name: str
@@ -254,6 +261,28 @@ async def health():
         status="ok",
         minio=minio_ok,
         detector="loaded" if _detector is not None else "not loaded",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.get("/stats", response_model=StatsResponse)
+async def stats():
+    """Aggregated system statistics for the OE Dashboard."""
+    minio_ok = "ok"
+    total_models = 0
+    try:
+        mc = get_minio()
+        mc.list_buckets()
+        objects = mc.list_objects(BUCKET_MODELS, recursive=False)
+        for _ in objects:
+            total_models += 1
+    except Exception as exc:
+        minio_ok = f"error: {exc}"
+
+    return StatsResponse(
+        total_models=total_models,
+        detector="loaded" if _detector is not None else "not loaded",
+        minio=minio_ok,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 

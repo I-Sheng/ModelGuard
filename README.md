@@ -2,8 +2,7 @@
 
 ModelGuard AI detects model theft attacks in real-time by analyzing API query patterns and behavioral anomalies, protecting enterprise ML models from IP extraction and poisoning.
 
-> **Prototype branch:** `dev` — MinIO + Docker Compose stack  
-> **Version:** 0.1.0-oss
+> **Version:** 0.2.0-oss
 
 ---
 
@@ -22,28 +21,30 @@ Each query is scored 0–100 and classified as `LOW / MEDIUM / HIGH / CRITICAL`.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Docker Compose Stack                    │
-│                                                             │
-│  ┌──────────────┐    ┌───────────────┐    ┌─────────────┐  │
-│  │  Streamlit   │───▶│  FastAPI API  │───▶│    MinIO    │  │
-│  │  Dashboard   │    │  :8000        │    │  :9000/9001 │  │
-│  │  :8501       │    │               │    │             │  │
-│  └──────────────┘    └───────┬───────┘    └──────┬──────┘  │
-│                              │                   │          │
-│                    Isolation Forest        3 Buckets:       │
-│                    anomaly detector        models           │
-│                    (in-process)            auditlog         │
-│                                            reports          │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Docker Compose Stack                          │
+│                                                                      │
+│  ┌────────────────┐  REST/JSON  ┌──────────────────────────────┐   │
+│  │  SwaggerAI     │ ──────────► │  Backend API                 │   │
+│  │  Frontend      │             │  FastAPI + Uvicorn :8000      │   │
+│  │  nginx :3000   │             │  Isolation Forest (in-proc)  │   │
+│  └────────────────┘             └──────────────┬───────────────┘   │
+│                                                 │ S3 API             │
+│  ┌────────────────┐  REST/JSON  ┌──────────────▼───────────────┐   │
+│  │  OE Dashboard  │ ──────────► │  MinIO                       │   │
+│  │  Streamlit     │             │  S3-compatible object store  │   │
+│  │  :8501         │             │  :9000 (API) / :9001 (UI)    │   │
+│  └────────────────┘             └──────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-| Service | Image | Port | Role |
-|---|---|---|---|
-| `minio` | `minio/minio:latest` | 9000 (API), 9001 (Console) | Object storage |
-| `minio-init` | `minio/mc:latest` | — | One-shot bucket bootstrap |
-| `api` | built from `./api` | 8000 | Detection backend |
-| `dashboard` | built from `./dashboard` | 8501 | Streamlit frontend |
+| Container | Port | Role |
+|---|---|---|
+| `backend` | 8000 | FastAPI detection engine — Isolation Forest, MinIO writes, all API endpoints |
+| `frontend` | 3000 | SwaggerAI — OpenAPI-driven UI for model queries and registration |
+| `oe-dashboard` | 8501 | Operations/Engineering dashboard — health, stats, audit logs, reports |
+| `minio` | 9000 / 9001 | S3-compatible object storage |
+| `minio-init` | — | One-shot bucket bootstrap |
 
 ---
 
@@ -60,30 +61,35 @@ Each query is scored 0–100 and classified as `LOW / MEDIUM / HIGH / CRITICAL`.
 ```bash
 git clone git@github.com:I-Sheng/ModelGuard.git
 cd ModelGuard
-git checkout dev
-
 docker compose up --build
 ```
 
-First run pulls images and builds the two custom containers. Subsequent runs are fast.
+First run pulls images and builds the three custom containers. Subsequent runs are fast.
 
 ### 2. Open the services
 
 | URL | What |
 |---|---|
-| http://localhost:8501 | Streamlit dashboard |
-| http://localhost:8000/docs | FastAPI interactive docs (Swagger UI) |
+| http://localhost:3000 | SwaggerAI frontend — submit queries, register models |
+| http://localhost:8501 | OE Dashboard — health, audit logs, attack reports |
+| http://localhost:8000/docs | Raw FastAPI Swagger UI (internal dev) |
 | http://localhost:9001 | MinIO Console — username/password: `minioadmin` |
 
-### 3. Run the smoke-test
+### 3. Seed demo data
+
+```bash
+docker compose exec backend python seed_history.py
+```
+
+### 4. Run the smoke-test
 
 ```bash
 bash demo.sh
 ```
 
-This registers a model, sends a normal query, sends a suspicious extraction query, then lists the resulting audit logs and attack reports from MinIO.
+Registers a model, sends a normal query, sends a suspicious extraction query, then lists audit logs and attack reports.
 
-### 4. Tear down
+### 5. Tear down
 
 ```bash
 docker compose down          # stop containers, keep MinIO data volume
@@ -112,27 +118,27 @@ cp .env.example .env
 
 ```
 ModelGuard/
-├── docker-compose.yml      # Orchestrates all services
-├── .env.example            # Environment variable template
-├── demo.sh                 # Smoke-test script
-├── api/                    # FastAPI detection backend
+├── docker-compose.yml        # Orchestrates all five services
+├── .env.example              # Environment variable template
+├── demo.sh                   # Smoke-test script
+├── api/                      # FastAPI detection backend
 │   ├── Dockerfile
 │   ├── main.py
+│   ├── seed_history.py
 │   └── requirements.txt
-├── dashboard/              # Streamlit frontend
+├── frontend/                 # SwaggerAI frontend (nginx + Swagger UI)
+│   ├── Dockerfile
+│   ├── index.html
+│   └── nginx.conf
+├── oe-dashboard/             # Operations/Engineering dashboard (Streamlit)
 │   ├── Dockerfile
 │   ├── app.py
 │   └── requirements.txt
 ├── images/
 │   └── Architecture_Diagram.png
-├── README.md               # ← you are here
+├── README.md
 └── Technical_Design.md
 ```
-
-See each subdirectory for its own README:
-
-- [`api/README.md`](api/README.md) — detection engine, endpoints, MinIO integration
-- [`dashboard/README.md`](dashboard/README.md) — Streamlit UI, pages, how it talks to the API
 
 ---
 
@@ -141,25 +147,23 @@ See each subdirectory for its own README:
 | Bucket | Content | Written by |
 |---|---|---|
 | `modelguard-models` | Model metadata JSON + binary artifacts | `POST /models/register`, `POST /models/{id}/upload` |
-| `modelguard-auditlog` | Every query audit record | `POST /analyze` (always) |
-| `modelguard-reports` | Attack reports for HIGH/CRITICAL events | `POST /analyze` (background task) |
-
-Object keys follow a predictable path structure so records are browsable in the MinIO Console without any extra tooling.
+| `modelguard-auditlog` | Every query audit record | `POST /analyze`, `POST /predict` (always) |
+| `modelguard-reports` | Attack reports for HIGH/CRITICAL events | `POST /analyze`, `POST /predict` (background task) |
 
 ---
 
 ## Detection Method
 
-The prototype uses an **Isolation Forest** trained on synthetic normal-traffic data. It scores each query on four features:
+An **Isolation Forest** trained on synthetic normal-traffic data scores each query on four features:
 
 | Feature | Description |
 |---|---|
 | `query_length` | Character count of the raw query |
-| `unique_token_ratio` | Distinct words ÷ total words (low = repetitive probing) |
+| `unique_token_ratio` | Distinct words / total words (low = repetitive probing) |
 | `entropy` | Shannon entropy of the query string |
 | `request_rate_1m` | Queries seen in the last 60 seconds from this process |
 
-The raw Isolation Forest decision score is mapped linearly to a 0–100 risk scale. Thresholds:
+Risk thresholds:
 
 | Score | Level |
 |---|---|
@@ -172,10 +176,10 @@ The raw Isolation Forest decision score is mapped linearly to a 0–100 risk sca
 
 ## Roadmap
 
-See [`Technical_Design.md`](Technical_Design.md) for the full MVP scope. Planned next steps:
+See [`Technical_Design.md`](Technical_Design.md) for the full design. Planned next steps:
 
 - [ ] Persistent query history (replace in-memory window with Redis or TimescaleDB)
 - [ ] Per-client rate tracking across requests
 - [ ] Webhook / Slack alerting on CRITICAL events
-- [ ] React frontend (replacing Streamlit)
 - [ ] Real model artifact scanning and checksum validation
+- [ ] Enterprise auth (API keys / JWT)

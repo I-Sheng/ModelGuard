@@ -46,13 +46,13 @@ services:
       "
 
   # ---------------------------------------------------------------------------
-  # API — FastAPI anomaly detection backend
+  # Backend — FastAPI anomaly detection engine (Isolation Forest)
   # ---------------------------------------------------------------------------
-  api:
+  backend:
     build:
       context: ./api
       dockerfile: Dockerfile
-    container_name: modelguard-api
+    container_name: modelguard-backend
     restart: unless-stopped
     depends_on:
       minio:
@@ -67,20 +67,36 @@ services:
       - ./api:/app   # hot-reload in dev
 
   # ---------------------------------------------------------------------------
-  # Dashboard — Streamlit frontend
+  # Frontend — SwaggerAI (nginx serving Swagger UI)
+  # Provides an OpenAPI-driven interactive UI for model queries and registration
   # ---------------------------------------------------------------------------
-  dashboard:
+  frontend:
     build:
-      context: ./dashboard
+      context: ./frontend
       dockerfile: Dockerfile
-    container_name: modelguard-dashboard
+    container_name: modelguard-frontend
     restart: unless-stopped
     depends_on:
-      - api
+      - backend
+    ports:
+      - "3000:80"
+
+  # ---------------------------------------------------------------------------
+  # OE Dashboard — Operations/Engineering monitoring (Streamlit)
+  # Internal tool for health checks, audit logs, and attack report review
+  # ---------------------------------------------------------------------------
+  oe-dashboard:
+    build:
+      context: ./oe-dashboard
+      dockerfile: Dockerfile
+    container_name: modelguard-oe-dashboard
+    restart: unless-stopped
+    depends_on:
+      - backend
     ports:
       - "8501:8501"
     volumes:
-      - ./dashboard:/app   # hot-reload in dev
+      - ./oe-dashboard:/app   # hot-reload in dev
 
 volumes:
   minio_data:

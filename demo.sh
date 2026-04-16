@@ -22,7 +22,7 @@ curl -s -X POST "$API/models/register" \
 echo ""
 
 echo "3. Seed historical attack data into MinIO..."
-docker compose exec -T api python seed_history.py
+docker compose exec -T backend python seed_history.py
 echo ""
 
 echo "4. POST /predict — normal query (LOW risk)..."
@@ -47,5 +47,7 @@ echo "7. GET /reports/$MODEL — list attack reports..."
 curl -s "$API/reports/$MODEL" | python3 -m json.tool
 echo ""
 
-echo "=== Done. Open http://localhost:8501 for the Streamlit dashboard. ==="
-echo "=== MinIO Console: http://localhost:9001 (minioadmin / minioadmin)  ==="
+echo "=== Done. ==="
+echo "=== SwaggerAI Frontend:  http://localhost:3000                       ==="
+echo "=== OE Dashboard:        http://localhost:8501                       ==="
+echo "=== MinIO Console:       http://localhost:9001 (minioadmin/minioadmin)==="

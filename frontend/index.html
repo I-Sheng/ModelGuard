@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ModelGuard AI — SwaggerAI</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <style>
+    /* ── Brand bar ── */
+    body { margin: 0; font-family: sans-serif; background: #0a0e1a; }
+
+    #brand-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #0d1b2a;
+      border-bottom: 2px solid #1e4d8c;
+      padding: 14px 24px;
+    }
+    #brand-bar .shield { font-size: 28px; }
+    #brand-bar h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      color: #e8f0fe;
+      letter-spacing: 0.03em;
+    }
+    #brand-bar .badge {
+      margin-left: auto;
+      background: #1e4d8c;
+      color: #93c5fd;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 12px;
+      letter-spacing: 0.05em;
+    }
+    #brand-bar .sub {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 2px;
+    }
+    #brand-bar .text { display: flex; flex-direction: column; }
+
+    /* ── Description banner ── */
+    #desc-bar {
+      background: #111827;
+      color: #94a3b8;
+      font-size: 13px;
+      padding: 10px 24px;
+      border-bottom: 1px solid #1e293b;
+    }
+    #desc-bar strong { color: #e2e8f0; }
+
+    /* ── Swagger UI overrides ── */
+    #swagger-ui { background: #0a0e1a; }
+    .swagger-ui .topbar { display: none; }
+    .swagger-ui .info    { background: #111827; padding: 20px; border-radius: 8px; }
+    .swagger-ui .scheme-container { background: #111827; padding: 12px 20px; }
+    .swagger-ui section.models { background: #111827; }
+    .swagger-ui .opblock-tag { color: #93c5fd !important; }
+    .swagger-ui .opblock.opblock-post .opblock-summary { background: #0d2b45 !important; }
+    .swagger-ui .opblock.opblock-get  .opblock-summary { background: #0d2b2b !important; }
+    .swagger-ui .btn.authorize { background: #1e4d8c; border-color: #1e4d8c; }
+    .swagger-ui .info .title { color: #e2e8f0; }
+    .swagger-ui .markdown p, .swagger-ui .renderedMarkdown p { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div id="brand-bar">
+    <span class="shield">🛡️</span>
+    <div class="text">
+      <h1>ModelGuard AI — SwaggerAI</h1>
+      <span class="sub">Real-time ML model theft detection · Interactive API console</span>
+    </div>
+    <span class="badge">v0.2.0-oss</span>
+  </div>
+
+  <div id="desc-bar">
+    <strong>SwaggerAI</strong> renders the live OpenAPI spec from the ModelGuard backend.
+    Use <strong>POST /analyze</strong> or <strong>POST /predict</strong> to submit queries and see
+    real-time risk scores. Use the <strong>Models</strong> group to register and manage protected models.
+    All calls are audited in MinIO.
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = () => {
+      SwaggerUIBundle({
+        // Fetch the OpenAPI spec directly from the backend (proxied by nginx)
+        url: "/api/openapi.json",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset,
+        ],
+        layout: "StandaloneLayout",
+        // Point "Try it out" requests at /api/* which nginx proxies to the backend
+        requestInterceptor: (req) => {
+          req.url = req.url.replace("http://backend:8000", "");
+          if (!req.url.startsWith("/api/")) {
+            req.url = "/api" + req.url;
+          }
+          return req;
+        },
+        // Expand the two most-used sections by default
+        docExpansion: "list",
+        defaultModelsExpandDepth: 1,
+        tryItOutEnabled: true,
+      });
+    };
+  </script>
+</body>
+</html>
