@@ -7,28 +7,29 @@
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
   <style>
     /* ── Brand bar ── */
-    body { margin: 0; font-family: sans-serif; background: #0a0e1a; }
+    body { margin: 0; font-family: sans-serif; background: #f8fafc; }
 
     #brand-bar {
       display: flex;
       align-items: center;
       gap: 12px;
-      background: #0d1b2a;
-      border-bottom: 2px solid #1e4d8c;
+      background: #ffffff;
+      border-bottom: 2px solid #2563eb;
       padding: 14px 24px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
     }
     #brand-bar .shield { font-size: 28px; }
     #brand-bar h1 {
       margin: 0;
       font-size: 20px;
       font-weight: 700;
-      color: #e8f0fe;
+      color: #1e293b;
       letter-spacing: 0.03em;
     }
     #brand-bar .badge {
       margin-left: auto;
-      background: #1e4d8c;
-      color: #93c5fd;
+      background: #2563eb;
+      color: #ffffff;
       font-size: 11px;
       font-weight: 600;
       padding: 3px 10px;
@@ -44,26 +45,17 @@
 
     /* ── Description banner ── */
     #desc-bar {
-      background: #111827;
-      color: #94a3b8;
+      background: #f1f5f9;
+      color: #475569;
       font-size: 13px;
       padding: 10px 24px;
-      border-bottom: 1px solid #1e293b;
+      border-bottom: 1px solid #e2e8f0;
     }
-    #desc-bar strong { color: #e2e8f0; }
+    #desc-bar strong { color: #1e293b; }
 
     /* ── Swagger UI overrides ── */
-    #swagger-ui { background: #0a0e1a; }
+    #swagger-ui { background: #f8fafc; }
     .swagger-ui .topbar { display: none; }
-    .swagger-ui .info    { background: #111827; padding: 20px; border-radius: 8px; }
-    .swagger-ui .scheme-container { background: #111827; padding: 12px 20px; }
-    .swagger-ui section.models { background: #111827; }
-    .swagger-ui .opblock-tag { color: #93c5fd !important; }
-    .swagger-ui .opblock.opblock-post .opblock-summary { background: #0d2b45 !important; }
-    .swagger-ui .opblock.opblock-get  .opblock-summary { background: #0d2b2b !important; }
-    .swagger-ui .btn.authorize { background: #1e4d8c; border-color: #1e4d8c; }
-    .swagger-ui .info .title { color: #e2e8f0; }
-    .swagger-ui .markdown p, .swagger-ui .renderedMarkdown p { color: #94a3b8; }
   </style>
 </head>
 <body>
@@ -91,7 +83,7 @@
     window.onload = () => {
       SwaggerUIBundle({
         // Fetch the OpenAPI spec directly from the backend (proxied by nginx)
-        url: "/api/openapi.json",
+        url: "/api/openapi-public.json",
         dom_id: "#swagger-ui",
         deepLinking: true,
         presets: [

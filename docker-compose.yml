@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ---------------------------------------------------------------------------
   # MinIO — S3-compatible object storage

@@ -247,6 +247,25 @@ async def startup_event():
 
 
 # ---------------------------------------------------------------------------
+# Public OpenAPI spec — only customer-facing endpoints
+# ---------------------------------------------------------------------------
+_PUBLIC_PATHS = {"/health", "/analyze", "/predict"}
+
+@app.get("/openapi-public.json", include_in_schema=False)
+async def openapi_public():
+    spec = app.openapi()
+    public_spec = {
+        **spec,
+        "paths": {
+            path: ops
+            for path, ops in spec.get("paths", {}).items()
+            if path in _PUBLIC_PATHS
+        },
+    }
+    return public_spec
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/health", response_model=HealthResponse)
