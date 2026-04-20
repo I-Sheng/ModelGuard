@@ -41,13 +41,13 @@ The `_USERS` dictionary in `main.py` contains plaintext passwords (`admin_passwo
 
 ---
 
-### T-04 — Unauthenticated Model Registration Allows Metadata Poisoning (High)
+### T-04 — Model Artifact Overwrite via Upload Without Ownership Check (High)
 
-`POST /models/register` has no authentication dependency. Any caller with network access to port 8000 can register a model with an arbitrary `model_id`, silently overwriting existing metadata in `modelguard-models`. This can corrupt the model inventory visible in the OE Dashboard and confuse detection routing.
+`POST /models/{model_id}/upload` constructs the MinIO key as `{model_id}/artifacts/{file.filename}` and calls `put_object` unconditionally. There is no check that the caller owns or registered the target `model_id`, and no versioning or conflict guard. Any authenticated `customer` can overwrite another model's existing artifact by uploading a file with the same `model_id` and filename, silently replacing the stored binary with arbitrary content.
 
 **Component**: Backend API  
-**STRIDE**: Tampering, Elevation of Privilege  
-**Mitigation**: Add `Depends(_ANY_AUTHED)` to the endpoint; restrict overwriting an existing `model_id` to the `admin` role.
+**STRIDE**: Tampering  
+**Mitigation**: Record the registering user on `POST /models/register`; verify on upload that the caller's JWT `username` matches the registered owner (or is `admin`); alternatively, enable MinIO object versioning on `modelguard-models` so overwrites are recoverable.
 
 ---
 

@@ -32,8 +32,8 @@ A motivated attacker only needs API access to systematically query a deployed mo
 
 ---
 
-### Risk 3 — Unauthenticated Model Registration Allows Metadata Poisoning *(High)*
+### Risk 3 — Model Artifact Overwrite via Upload Without Ownership Check *(High)*
 
-**What:** `POST /models/register` has no authentication check. Any caller with network access to port 8000 can register or silently overwrite any model's metadata.
+**What:** `POST /models/{model_id}/upload` has no ownership validation. Any authenticated customer can upload a file targeting any `model_id` with any filename, silently replacing another customer's stored artifact.
 
-**Why it is #3:** ModelGuard's detection is model-scoped — audit logs, risk scores, and attack reports are all keyed by `model_id`. If an attacker poisons the model registry (wrong owner, wrong version, a rogue model entry), operators lose confidence in the dashboard, incident attribution breaks down, and a real extraction campaign can be disguised as noise under a fake model ID. It requires no credentials and leaves no obvious trace.
+**Why it is #3:** Model artifacts are the core IP ModelGuard is built to protect. A malicious customer can overwrite a competitor's binary with a backdoored or corrupted version — same filename, same model ID, no error returned. There is no versioning to recover from, and the audit trail only records that an upload occurred, not that it was unauthorized.
