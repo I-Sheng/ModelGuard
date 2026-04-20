@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 from pydantic import BaseModel, Field
 from minio import Minio
 from minio.error import S3Error
@@ -54,7 +54,6 @@ JWT_SECRET    = os.getenv("JWT_SECRET_KEY", "modelguard-dev-secret-change-in-pro
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _oauth2  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 # Demo users: username → {password, role}
@@ -66,7 +65,7 @@ _USERS: dict[str, dict] = {
 }
 # Pre-hash at startup (done once, not per-request)
 _HASHED_USERS = {
-    u: {"hashed_password": _pwd_ctx.hash(v["password"]), "role": v["role"]}
+    u: {"hashed_password": _bcrypt.hashpw(v["password"].encode(), _bcrypt.gensalt()), "role": v["role"]}
     for u, v in _USERS.items()
 }
 
@@ -358,7 +357,7 @@ class TokenResponse(BaseModel):
 async def login(form: OAuth2PasswordRequestForm = Depends()):
     """Issue a JWT for a valid username/password pair."""
     user = _HASHED_USERS.get(form.username)
-    if not user or not _pwd_ctx.verify(form.password, user["hashed_password"]):
+    if not user or not _bcrypt.checkpw(form.password.encode(), user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     token = _create_token(form.username, user["role"])
     return TokenResponse(access_token=token, role=user["role"], username=form.username)
