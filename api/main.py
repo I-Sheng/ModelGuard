@@ -15,9 +15,11 @@ from typing import Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, BackgroundTasks, Depends
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
+from starlette.requests import Request
 from jose import JWTError, jwt
 import bcrypt as _bcrypt
 from pydantic import BaseModel, Field
@@ -54,8 +56,6 @@ JWT_SECRET    = os.getenv("JWT_SECRET_KEY", "modelguard-dev-secret-change-in-pro
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60
 
-_oauth2  = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
 # Demo users: username → {password, role}
 # Roles: "ml_user" (predict + models), "customer" (+ audit + reports), "admin" (all)
 _USERS: dict[str, dict] = {
@@ -75,7 +75,11 @@ def _create_token(username: str, role: str) -> str:
     return jwt.encode({"sub": username, "role": role, "exp": expire}, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-async def get_current_user(token: str = Depends(_oauth2)) -> dict:
+async def get_current_user(request: Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = auth[7:]
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
@@ -319,21 +323,9 @@ _CUSTOMER_PATHS = _ML_USER_PATHS | {
 
 def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
     spec = app.openapi()
-    if allowed_paths is not None:
-        filtered_paths = {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}
-        spec = {**spec, "paths": filtered_paths}
-    # Strip OAuth2 security scheme so Swagger UI hides the Authorize button and
-    # lock icons — auth is handled by the login page, not the Swagger UI flow.
-    components = spec.get("components", {})
-    if "securitySchemes" in components:
-        spec = {**spec, "components": {k: v for k, v in components.items() if k != "securitySchemes"}}
-    cleaned_paths = {}
-    for path, ops in spec.get("paths", {}).items():
-        cleaned_ops = {}
-        for method, op in ops.items():
-            cleaned_ops[method] = {k: v for k, v in op.items() if k != "security"} if isinstance(op, dict) else op
-        cleaned_paths[path] = cleaned_ops
-    return {**spec, "paths": cleaned_paths}
+    if allowed_paths is None:
+        return spec
+    return {**spec, "paths": {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}}
 
 
 @app.get("/openapi-ml.json", include_in_schema=False)
