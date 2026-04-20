@@ -25,8 +25,8 @@ Compare the current branch to `main` and open a pull request using the standard 
 - [ ] `docker compose up -d` starts all services successfully
 - [ ] <Specific endpoint or behaviour to verify for each changed feature>
 - [ ] OE dashboard loads without errors
-- [ ] [N/A] If dashboard changed: Streamlit app loads without errors
-- [ ] [N/A] Docs updated if user-facing behaviour changed
+- [ ] If dashboard changed: Streamlit app loads without errors
+- [ ] Docs updated if user-facing behaviour changed
 
 ---
 
@@ -40,5 +40,5 @@ Compare the current branch to `main` and open a pull request using the standard 
 ## Rules
 
 - Derive the PR title from the dominant change type and a short imperative description (≤ 70 chars).
-- Only mark a validation item `[N/A]` if it genuinely does not apply; otherwise leave it as `[ ]`.
+- Check `[x]` a validation item if it applies and passes; leave `[ ]` if it does not apply or was not verified.
 - Do not push or merge — only create the PR.
