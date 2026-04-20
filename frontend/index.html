@@ -55,6 +55,7 @@
       letter-spacing: 0.04em;
     }
     #user-bar .role-badge.customer { background: #7c3aed; }
+    #user-bar .role-badge.admin    { background: #b91c1c; }
     #user-bar button {
       margin-left: auto;
       background: none;
@@ -211,9 +212,14 @@
       document.getElementById('user-name').textContent = username;
       roleBadge.textContent = role.replace('_', ' ');
       if (role === 'customer') roleBadge.classList.add('customer');
+      if (role === 'admin')    roleBadge.classList.add('admin');
       userBar.style.display = 'flex';
 
-      const specUrl = role === 'customer' ? '/api/openapi-customer.json' : '/api/openapi-ml.json';
+      const specUrl = role === 'admin'
+        ? '/api/openapi-admin.json'
+        : role === 'customer'
+          ? '/api/openapi-customer.json'
+          : '/api/openapi-ml.json';
 
       SwaggerUIBundle({
         url: specUrl,

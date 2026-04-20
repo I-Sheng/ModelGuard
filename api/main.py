@@ -57,11 +57,12 @@ JWT_EXPIRE_MINUTES = 60
 _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _oauth2  = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# Demo users: username → {hashed_password, role}
-# Roles: "ml_user" (analyze + models), "customer" (+ reports)
+# Demo users: username → {password, role}
+# Roles: "ml_user" (predict + models), "customer" (+ audit + reports), "admin" (all)
 _USERS: dict[str, dict] = {
     "ml_user":   {"password": "ml_password",       "role": "ml_user"},
     "customer1": {"password": "customer_password",  "role": "customer"},
+    "admin":     {"password": "admin_password",     "role": "admin"},
 }
 # Pre-hash at startup (done once, not per-request)
 _HASHED_USERS = {
@@ -96,8 +97,8 @@ def require_role(*roles: str):
     return _check
 
 
-_ANY_AUTHED  = require_role("ml_user", "customer")
-_CUSTOMER    = require_role("customer")
+_ANY_AUTHED  = require_role("ml_user", "customer", "admin")
+_CUSTOMER    = require_role("customer", "admin")
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +307,7 @@ async def startup_event():
 # Role-scoped OpenAPI specs (served to the frontend after login)
 # ml_user  : GET /models, POST /predict
 # customer : ml_user paths + GET /audit/{model_id} + GET /reports/*
+# admin    : full spec (all paths, including those not exposed to other roles)
 # ---------------------------------------------------------------------------
 _ML_USER_PATHS  = {"/models", "/predict"}
 _CUSTOMER_PATHS = _ML_USER_PATHS | {
@@ -315,8 +317,10 @@ _CUSTOMER_PATHS = _ML_USER_PATHS | {
 }
 
 
-def _filtered_spec(allowed_paths: set) -> dict:
+def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
     spec = app.openapi()
+    if allowed_paths is None:
+        return spec
     return {**spec, "paths": {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}}
 
 
@@ -328,6 +332,11 @@ async def openapi_ml():
 @app.get("/openapi-customer.json", include_in_schema=False)
 async def openapi_customer():
     return _filtered_spec(_CUSTOMER_PATHS)
+
+
+@app.get("/openapi-admin.json", include_in_schema=False)
+async def openapi_admin_spec():
+    return _filtered_spec()
 
 
 @app.get("/openapi-public.json", include_in_schema=False)
