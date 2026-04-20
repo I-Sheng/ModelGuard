@@ -29,49 +29,57 @@
 ### Component Map
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Docker Compose Stack                          │
-│                                                                      │
-│  ┌────────────────┐  REST/JSON  ┌──────────────────────────────┐   │
-│  │  SwaggerAI     │ ──────────► │  Backend API                 │   │
-│  │  Frontend      │             │  FastAPI + Uvicorn :8000      │   │
-│  │  (nginx :3000) │             │  Isolation Forest (in-proc)  │   │
-│  └────────────────┘             └──────────────┬───────────────┘   │
-│                                                 │ S3 API             │
-│  ┌────────────────┐  REST/JSON  ┌──────────────▼───────────────┐   │
-│  │  OE Dashboard  │ ──────────► │  MinIO                       │   │
-│  │  Streamlit     │             │  S3-compatible object store  │   │
-│  │  :8501         │             │  :9000 (API) / :9001 (UI)    │   │
-│  └────────────────┘             └──────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                            Docker Compose Stack                               │
+│                                                                               │
+│  ┌──────────────────┐   REST + JWT    ┌──────────────────┐   S3 API          │
+│  │  SwaggerAI       │ ──────────────► │  Backend API     │ ──────────────►   │
+│  │  Frontend        │                 │  FastAPI :8000   │                   │
+│  │  nginx :3000     │                 │                  │  ┌─────────────┐  │
+│  │                  │                 │  ● JWT Auth+RBAC │  │  MinIO      │  │
+│  │  Role-scoped     │                 │  ● Isolation     │  │  :9000      │  │
+│  │  OpenAPI spec    │                 │    Forest        │  │  :9001(UI)  │  │
+│  └──────────────────┘                 │  ● MinIO writes  │  └─────────────┘  │
+│                                       └──────────────────┘                   │
+│  ┌──────────────────┐   REST + JWT           ▲                               │
+│  │  OE Dashboard    │ ──────────────────────►│                               │
+│  │  Streamlit :8501 │   /health/detail        │                               │
+│  │                  │   /stats                │                               │
+│  │  Auto-logins as  │   /audit/{model_id}     │                               │
+│  │  admin on start  │   /reports/{model_id}   │                               │
+│  └──────────────────┘   /models              ─┘                               │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Container Responsibilities
 
 | Container | Image / Build | Port | Role |
 |---|---|---|---|
-| `backend` | `./api` (Python 3.11-slim) | 8000 | Detection engine — Isolation Forest, MinIO writes, all API endpoints |
-| `frontend` | `./frontend` (nginx:alpine) | 3000 | SwaggerAI — OpenAPI-driven UI for model registration and query analysis |
-| `oe-dashboard` | `./oe-dashboard` (Python 3.11-slim) | 8501 | Operations/Engineering dashboard — health, stats, audit logs, attack reports |
+| `backend` | `./api` (Python 3.11-slim) | 8000 | Detection engine — JWT auth + RBAC, Isolation Forest, MinIO writes, all API endpoints |
+| `frontend` | `./frontend` (nginx:alpine) | 3000 | SwaggerAI — role-scoped OpenAPI UI; loads filtered spec after JWT login |
+| `oe-dashboard` | `./oe-dashboard` (Python 3.11-slim) | 8501 | Operations/Engineering dashboard — authenticates as admin, health, stats, audit logs, attack reports |
 | `minio` | `minio/minio:latest` | 9000 / 9001 | Object storage — models, audit logs, attack reports |
 | `minio-init` | `minio/mc:latest` | — | One-shot bootstrap — creates the three MinIO buckets |
 
 ### API Contract — Who Calls What
 
 ```
-SwaggerAI Frontend  ──► POST /analyze
-                    ──► POST /predict
-                    ──► POST /models/register
-                    ──► POST /models/{id}/upload
-                    ──► GET  /models
-                    ──► GET  /models/{id}
+SwaggerAI Frontend  ──► POST /auth/login            (public — obtain JWT)
+                    ──► GET  /openapi-{role}.json   (public — role-scoped spec)
+                    ──► POST /analyze               (Bearer JWT required)
+                    ──► POST /predict               (Bearer JWT required)
+                    ──► POST /models/register       (public)
+                    ──► POST /models/{id}/upload    (Bearer JWT, customer+)
+                    ──► GET  /models                (Bearer JWT required)
+                    ──► GET  /models/{id}           (public)
 
-OE Dashboard        ──► GET  /health
-                    ──► GET  /stats
-                    ──► GET  /audit/{model_id}
-                    ──► GET  /reports/{model_id}
-                    ──► GET  /reports/{model_id}/{key}
-                    ──► GET  /models
+OE Dashboard        ──► POST /auth/login            (auto-login as admin on startup)
+                    ──► GET  /health/detail         (Bearer JWT required)
+                    ──► GET  /stats                 (public)
+                    ──► GET  /audit/{model_id}      (Bearer JWT, customer+)
+                    ──► GET  /reports/{model_id}    (Bearer JWT, customer+)
+                    ──► GET  /reports/{model_id}/{key} (Bearer JWT, customer+)
+                    ──► GET  /models                (Bearer JWT required)
 ```
 
 ### MinIO Bucket Layout
@@ -115,9 +123,10 @@ POST /analyze  (or POST /predict)
 | Layer | Choice | Rationale |
 |---|---|---|
 | API framework | FastAPI + Uvicorn | Async I/O, auto OpenAPI docs at `/docs`, Pydantic validation |
+| Auth | `python-jose` (JWT) + `bcrypt` | HS256 signed tokens; bcrypt for password hashing at startup |
 | Anomaly detection | scikit-learn `IsolationForest` | Unsupervised, no labelled attack data required |
 | Object storage | MinIO (S3-compatible) | Self-hosted, no cloud dependency, tamper-evident audit trail |
-| SwaggerAI Frontend | nginx + Swagger UI (CDN) | Zero-build, OpenAPI-spec-driven, works directly against the backend |
+| SwaggerAI Frontend | nginx + Swagger UI (CDN) | Zero-build; loads role-scoped `/openapi-{role}.json` after JWT login |
 | OE Dashboard | Streamlit | Rapid iteration; operations monitoring with tables, charts, health checks |
 | Containerisation | Docker Compose | Single-command deployment, service health checks built-in |
 | Data validation | Pydantic v2 | Type-safe request/response models |
@@ -240,14 +249,38 @@ Retrieve registered model metadata.
 #### `GET /models`
 List all registered model IDs.
 
+### Auth Endpoints
+
+#### `POST /auth/login`
+Issues a signed JWT for a valid username/password pair (form-encoded). Returns `access_token`, `token_type`, `role`, and `username`. Token expiry: 60 minutes.
+
+#### `GET /auth/me`
+Returns the authenticated user's `username` and `role`. Requires `Bearer` token.
+
+**Roles and permitted paths:**
+
+| Role | Permitted endpoints |
+|---|---|
+| `ml_user` | `GET /models`, `POST /predict` |
+| `customer` | ml_user paths + `/models/{id}/upload`, `/audit/{id}`, `/reports/*` |
+| `admin` | All endpoints |
+
 ### Operations Endpoints
 
 #### `GET /health`
-Returns API status, MinIO connectivity, and detector load state.
+Public liveness probe — no auth required. Returns minimal status only.
+
+```json
+{ "status": "ok" }
+```
+
+#### `GET /health/detail`
+Full subsystem health check. Requires `Bearer` token (any role). Probes MinIO, the Isolation Forest detector, and the frontend container.
 
 ```json
 {
   "status": "ok",
+  "frontend": "ok",
   "minio": "ok",
   "detector": "loaded",
   "timestamp": "2026-04-15T10:00:00+00:00"
@@ -282,25 +315,23 @@ Fetch the full JSON content of a specific attack report.
 **Container**: `frontend` (nginx:alpine)  
 **URL**: `http://localhost:3000`
 
-The SwaggerAI frontend is an nginx container that serves a custom HTML page embedding **Swagger UI**. Swagger UI reads the OpenAPI schema directly from the backend (`/openapi.json`) and renders a fully interactive interface for all API endpoints.
+The SwaggerAI frontend is an nginx container that serves a custom HTML page embedding **Swagger UI**. On load the user logs in via `POST /auth/login`; the frontend then fetches the role-scoped OpenAPI spec (`/openapi-{role}.json`) and reloads Swagger UI against that filtered schema. Each role sees only the endpoints they are permitted to call.
 
 ### Why Swagger UI
 
 - Zero build tooling — just a single HTML file and nginx config
-- Always in sync with the backend — the OpenAPI spec is the single source of truth
+- Role-scoped specs are the single source of truth — the filtered spec is authoritative for each role's permitted paths
 - Lets users submit queries, register models, and upload artifacts interactively
 - Familiar to API developers; sufficient for the MVP
 
-### Pages / Functionality
+### Role-scoped spec endpoints
 
-| Endpoint Group | What the user can do |
-|---|---|
-| `POST /analyze` | Submit a query text and see risk score, features, and MinIO audit key |
-| `POST /predict` | Submit to the mock sentiment model and get prediction + risk |
-| `POST /models/register` | Register a model with metadata |
-| `POST /models/{id}/upload` | Upload a model artifact |
-| `GET /models` | List registered models |
-| `GET /health` | Check system health |
+| Spec URL | Loaded for role | Visible paths |
+|---|---|---|
+| `/openapi-ml.json` | `ml_user` | `GET /models`, `POST /predict` |
+| `/openapi-customer.json` | `customer` | ml_user paths + upload, audit, reports |
+| `/openapi-admin.json` | `admin` | All paths |
+| `/openapi-public.json` | unauthenticated | `GET /health` only |
 
 ---
 
@@ -311,12 +342,14 @@ The SwaggerAI frontend is an nginx container that serves a custom HTML page embe
 
 The OE Dashboard is a Streamlit app focused on **internal operations and engineering monitoring**. It is not user-facing; it is the tool an ML platform operator uses to monitor model protection status and investigate incidents.
 
+On startup the dashboard auto-logs in to the backend using the `OE_ADMIN_USER` / `OE_ADMIN_PASSWORD` environment variables (defaults: `admin` / `admin_password`) and caches the JWT in Streamlit session state. All backend calls carry this admin token. The sidebar displays a live **System Health** indicator (Frontend → API → MinIO → Detector) refreshed on every page load via `GET /health/detail`.
+
 | Page | Description |
 |---|---|
-| System Health | API health status, detector state, MinIO connectivity |
-| Statistics | Registered model count, system metrics from `GET /stats` |
-| Audit Logs | Browse audit log entries per model with optional date filter |
-| Attack Reports | Browse and drill into HIGH/CRITICAL attack reports |
+| System Health | Four-column health metrics (Frontend, API, MinIO, Detector) from `GET /health/detail`; raw JSON payload; risk level reference chart |
+| Statistics | Registered model count and system state from `GET /stats`; model list table |
+| Audit Logs | Browse audit log entries per model with optional date filter via `GET /audit/{model_id}` |
+| Attack Reports | List and drill into HIGH/CRITICAL reports via `GET /reports/{model_id}` and `GET /reports/{model_id}/{key}` |
 
 ---
 
@@ -351,9 +384,10 @@ bash demo.sh
 
 | URL | Purpose |
 |---|---|
-| `http://localhost:3000` | SwaggerAI — interactive API frontend |
+| `http://localhost:3000` | SwaggerAI — role-scoped interactive API frontend |
 | `http://localhost:8000/docs` | Raw FastAPI Swagger UI (internal) |
-| `http://localhost:8000/health` | Health check |
+| `http://localhost:8000/health` | Public liveness probe |
+| `http://localhost:8000/health/detail` | Full subsystem health (requires Bearer token) |
 | `http://localhost:8501` | OE Dashboard |
 | `http://localhost:9001` | MinIO console (minioadmin / minioadmin) |
 
@@ -380,11 +414,12 @@ docker compose exec backend python seed_history.py
 
 - Agentic auto-mitigation (block/quarantine attackers)
 - Multi-tenant support
-- Enterprise auth (API keys, JWT, SAML/OIDC)
+- SAML/OIDC federated identity
 - Rate limiting middleware
 - Transformer-based detectors
 - Kubernetes / Helm deployment
 - Compliance (SOC 2, GDPR)
 - WebSocket live-push to dashboard
-- Email / Slack alerting
+- Email / Slack alerting on CRITICAL events
 - Persistent detector state across restarts (currently in-memory)
+- Per-client rate tracking across distributed instances

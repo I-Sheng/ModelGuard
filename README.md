@@ -16,6 +16,8 @@ When a client queries your deployed ML model, ModelGuard sits in the detection p
 
 Each query is scored 0–100 and classified as `LOW / MEDIUM / HIGH / CRITICAL`. All audit records are stored durably in MinIO (S3-compatible object storage). `HIGH` and `CRITICAL` events also produce a dedicated attack report.
 
+Access to the API is controlled by **JWT-based role-based access control**. Clients log in once at `POST /auth/login` and use the returned Bearer token on all subsequent calls. The frontend loads a role-scoped OpenAPI spec so each user only sees the endpoints they are permitted to call.
+
 ---
 
 ## Architecture
@@ -40,11 +42,48 @@ Each query is scored 0–100 and classified as `LOW / MEDIUM / HIGH / CRITICAL`.
 
 | Container | Port | Role |
 |---|---|---|
-| `backend` | 8000 | FastAPI detection engine — Isolation Forest, MinIO writes, all API endpoints |
-| `frontend` | 3000 | SwaggerAI — OpenAPI-driven UI for model queries and registration |
+| `backend` | 8000 | FastAPI detection engine — Isolation Forest, JWT auth, MinIO writes, all API endpoints |
+| `frontend` | 3000 | SwaggerAI — role-scoped OpenAPI UI for model queries and registration |
 | `oe-dashboard` | 8501 | Operations/Engineering dashboard — health, stats, audit logs, reports |
 | `minio` | 9000 / 9001 | S3-compatible object storage |
 | `minio-init` | — | One-shot bucket bootstrap |
+
+---
+
+## Authentication
+
+All endpoints except `GET /health` and `POST /auth/login` require a `Bearer` JWT token.
+
+### 1. Log in
+
+```bash
+curl -s -X POST http://localhost:8000/auth/login \
+  -d "username=ml_user&password=ml_password" | jq .
+# → { "access_token": "...", "token_type": "bearer", "role": "ml_user", "username": "ml_user" }
+```
+
+Use the returned `access_token` as `Authorization: Bearer <token>` on all subsequent requests.
+
+### 2. Demo users
+
+| Username | Password | Role | Permitted endpoints |
+|---|---|---|---|
+| `ml_user` | `ml_password` | `ml_user` | `GET /models`, `POST /predict` |
+| `customer1` | `customer_password` | `customer` | ml_user paths + `/models/{id}/upload`, `/audit/{id}`, `/reports/*` |
+| `admin` | `admin_password` | `admin` | All endpoints |
+
+> **Production note:** Replace demo credentials via environment variables and set a strong `JWT_SECRET_KEY`.
+
+### 3. Role-scoped OpenAPI specs
+
+The frontend fetches a filtered spec after login so users only see their permitted paths:
+
+| Endpoint | Served to |
+|---|---|
+| `/openapi-ml.json` | `ml_user` |
+| `/openapi-customer.json` | `customer` |
+| `/openapi-admin.json` | `admin` |
+| `/openapi-public.json` | unauthenticated (only `/health`) |
 
 ---
 
@@ -110,7 +149,10 @@ cp .env.example .env
 |---|---|---|
 | `MINIO_ROOT_USER` | `minioadmin` | MinIO root username |
 | `MINIO_ROOT_PASSWORD` | `minioadmin` | MinIO root password |
-| `MINIO_ENDPOINT` | `minio:9000` | Internal endpoint (service name) |
+| `MINIO_ENDPOINT` | `minio:9000` | Internal MinIO endpoint (service name) |
+| `JWT_SECRET_KEY` | `modelguard-dev-secret-change-in-production` | HS256 signing secret — **change this in production** |
+| `OE_ADMIN_USER` | `admin` | Username the OE dashboard uses to authenticate with the backend |
+| `OE_ADMIN_PASSWORD` | `admin_password` | Password for `OE_ADMIN_USER` |
 
 ---
 
@@ -152,6 +194,27 @@ ModelGuard/
 
 ---
 
+## API Endpoints
+
+| Method | Path | Auth | Role | Description |
+|---|---|---|---|---|
+| `POST` | `/auth/login` | No | — | Issue a JWT for a valid username/password |
+| `GET` | `/auth/me` | Yes | any | Return the current user's identity and role |
+| `GET` | `/health` | No | — | Public liveness probe — returns `{"status":"ok"}` |
+| `GET` | `/health/detail` | Yes | any | Full health: API, MinIO, Isolation Forest, Frontend |
+| `GET` | `/stats` | No | — | Aggregated system stats for the OE Dashboard |
+| `POST` | `/models/register` | No | — | Register a model (stores metadata in MinIO) |
+| `GET` | `/models` | Yes | any | List all registered models |
+| `GET` | `/models/{id}` | No | — | Retrieve model metadata |
+| `POST` | `/models/{id}/upload` | Yes | customer, admin | Upload a binary model artifact |
+| `POST` | `/analyze` | Yes | any | Analyze a query for theft/extraction patterns |
+| `POST` | `/predict` | Yes | any | Run mock sentiment inference + anomaly detection |
+| `GET` | `/audit/{model_id}` | Yes | customer, admin | List audit log entries (optionally filtered by date) |
+| `GET` | `/reports/{model_id}` | Yes | customer, admin | List HIGH/CRITICAL attack reports |
+| `GET` | `/reports/{model_id}/{key}` | Yes | customer, admin | Fetch full content of an attack report |
+
+---
+
 ## Detection Method
 
 An **Isolation Forest** trained on synthetic normal-traffic data scores each query on four features:
@@ -182,4 +245,16 @@ See [`Technical_Design.md`](Technical_Design.md) for the full design. Planned ne
 - [ ] Per-client rate tracking across requests
 - [ ] Webhook / Slack alerting on CRITICAL events
 - [ ] Real model artifact scanning and checksum validation
-- [ ] Enterprise auth (API keys / JWT)
+
+---
+
+## Changelog
+
+### 0.2.0-oss
+
+- **JWT auth + RBAC** — `POST /auth/login` issues signed tokens; all non-public endpoints require `Bearer` auth. Three built-in roles: `ml_user`, `customer`, `admin`.
+- **Role-scoped OpenAPI specs** — frontend loads `/openapi-ml.json`, `/openapi-customer.json`, or `/openapi-admin.json` after login so each role sees only its permitted paths.
+- **`/health` split** — `GET /health` is now a public liveness probe returning `{"status":"ok"}`. Full subsystem status (MinIO, Isolation Forest, Frontend) moved to `GET /health/detail` (auth required).
+- **Frontend health check** — `/health/detail` now probes the frontend container and returns its status.
+- **`POST /predict`** — new endpoint that runs the mock sentiment classifier and ModelGuard anomaly detection in a single call, returning both the model prediction and a risk assessment.
+- **OE Dashboard auth** — the dashboard authenticates as `admin` on startup using `OE_ADMIN_USER` / `OE_ADMIN_PASSWORD` environment variables. Health indicators reordered: Frontend → API → MinIO → Detector.
