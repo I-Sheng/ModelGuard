@@ -23,30 +23,64 @@ Access to the API is controlled by **JWT-based role-based access control**. Clie
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Docker Compose Stack                          │
-│                                                                      │
-│  ┌────────────────┐  REST/JSON  ┌──────────────────────────────┐   │
-│  │  SwaggerAI     │ ──────────► │  Backend API                 │   │
-│  │  Frontend      │             │  FastAPI + Uvicorn :8000      │   │
-│  │  nginx :3000   │             │  Isolation Forest (in-proc)  │   │
-│  └────────────────┘             └──────────────┬───────────────┘   │
-│                                                 │ S3 API             │
-│  ┌────────────────┐  REST/JSON  ┌──────────────▼───────────────┐   │
-│  │  OE Dashboard  │ ──────────► │  MinIO                       │   │
-│  │  Streamlit     │             │  S3-compatible object store  │   │
-│  │  :8501         │             │  :9000 (API) / :9001 (UI)    │   │
-│  └────────────────┘             └──────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          Docker Compose Stack                             │
+│                                                                           │
+│  ┌──────────────────┐  1. POST /auth/login      ┌────────────────────┐  │
+│  │  SwaggerAI       │ ────────────────────────► │                    │  │
+│  │  Frontend        │  2. GET /openapi-{role}   │   Backend API      │  │
+│  │  nginx :3000     │ ◄──────────────────────── │   FastAPI :8000    │  │
+│  │                  │  3. Bearer JWT on all      │                    │  │
+│  │  Role-scoped     │     API calls             │  ● JWT Auth + RBAC │  │
+│  │  Swagger UI      │ ────────────────────────► │  ● Isolation Forest│  │
+│  └──────────────────┘                           │  ● MinIO writes    │  │
+│                                                  └────────┬───────────┘  │
+│  ┌──────────────────┐  Bearer JWT (admin)                │ S3 API        │
+│  │  OE Dashboard    │ ────────────────────────►          │               │
+│  │  Streamlit :8501 │  Auto-login on startup    ┌────────▼───────────┐  │
+│  │                  │  /health/detail            │  MinIO             │  │
+│  │  Health │ Stats  │  /audit/{model_id}         │  :9000  S3 API     │  │
+│  │  Audit  │ Reports│  /reports/{model_id}       │  :9001  Console    │  │
+│  └──────────────────┘                            │                    │  │
+│                                                   │  modelguard-models │  │
+│  ┌──────────────────┐  one-shot bucket creation  │  modelguard-audit  │  │
+│  │  minio-init      │ ────────────────────────►  │  modelguard-reports│  │
+│  └──────────────────┘                            └────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Detection Pipeline
+
+Every call to `POST /analyze` or `POST /predict` runs the same pipeline:
+
+```
+Incoming query
+     │
+     ├─ 1. JWT verification + role check
+     │
+     ├─ 2. Feature extraction
+     │        query_length · unique_token_ratio · shannon_entropy · request_rate_1m
+     │
+     ├─ 3. Isolation Forest inference
+     │        → anomaly flag · decision_function score → risk score 0–100
+     │        → risk level  LOW / MEDIUM / HIGH / CRITICAL
+     │
+     ├─ 4. Audit record → MinIO  modelguard-auditlog  (every request)
+     │
+     ├─ 5. Attack report → MinIO  modelguard-reports  (HIGH / CRITICAL only, background)
+     │
+     └─ 6. JSON response returned to caller
+```
+
+### Containers
 
 | Container | Port | Role |
 |---|---|---|
-| `backend` | 8000 | FastAPI detection engine — Isolation Forest, JWT auth, MinIO writes, all API endpoints |
-| `frontend` | 3000 | SwaggerAI — role-scoped OpenAPI UI for model queries and registration |
-| `oe-dashboard` | 8501 | Operations/Engineering dashboard — health, stats, audit logs, reports |
-| `minio` | 9000 / 9001 | S3-compatible object storage |
-| `minio-init` | — | One-shot bucket bootstrap |
+| `backend` | 8000 | FastAPI detection engine — JWT auth + RBAC, Isolation Forest, MinIO writes, all API endpoints |
+| `frontend` | 3000 | SwaggerAI — serves role-scoped OpenAPI spec after JWT login; proxies API calls |
+| `oe-dashboard` | 8501 | Operations/Engineering dashboard — auto-logins as admin; health, stats, audit logs, reports |
+| `minio` | 9000 / 9001 | S3-compatible object storage for models, audit logs, and attack reports |
+| `minio-init` | — | One-shot bootstrap — creates the three MinIO buckets, then exits |
 
 ---
 
@@ -203,7 +237,7 @@ ModelGuard/
 | `GET` | `/health` | No | — | Public liveness probe — returns `{"status":"ok"}` |
 | `GET` | `/health/detail` | Yes | any | Full health: API, MinIO, Isolation Forest, Frontend |
 | `GET` | `/stats` | No | — | Aggregated system stats for the OE Dashboard |
-| `POST` | `/models/register` | No | — | Register a model (stores metadata in MinIO) |
+| `POST` | `/models/register` | Yes | admin | Register a model (stores metadata in MinIO) |
 | `GET` | `/models` | Yes | any | List all registered models |
 | `GET` | `/models/{id}` | No | — | Retrieve model metadata |
 | `POST` | `/models/{id}/upload` | Yes | customer, admin | Upload a binary model artifact |
