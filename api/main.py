@@ -379,8 +379,15 @@ async def whoami(user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health():
+    """Public liveness probe — returns minimal status only."""
+    return {"status": "ok"}
+
+
+@app.get("/health/detail", response_model=HealthResponse)
+async def health_detail(_user: dict = Depends(_ANY_AUTHED)):
+    """Detailed health check including MinIO, detector, and frontend — requires auth."""
     minio_ok = "ok"
     try:
         get_minio().list_buckets()

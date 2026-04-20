@@ -91,6 +91,9 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      OE_ADMIN_USER: admin
+      OE_ADMIN_PASSWORD: admin_password
     ports:
       - "8501:8501"
     volumes:
