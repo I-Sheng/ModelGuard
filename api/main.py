@@ -10,13 +10,19 @@ import json
 import uuid
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, BackgroundTasks, Depends
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
+from starlette.requests import Request
+from jose import JWTError, jwt
+import bcrypt as _bcrypt
 from pydantic import BaseModel, Field
 from minio import Minio
 from minio.error import S3Error
@@ -43,6 +49,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Auth — JWT + role-based access control
+# ---------------------------------------------------------------------------
+JWT_SECRET    = os.getenv("JWT_SECRET_KEY", "modelguard-dev-secret-change-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 60
+
+# Demo users: username → {password, role}
+# Roles: "ml_user" (predict + models), "customer" (+ audit + reports), "admin" (all)
+_USERS: dict[str, dict] = {
+    "ml_user":   {"password": "ml_password",       "role": "ml_user"},
+    "customer1": {"password": "customer_password",  "role": "customer"},
+    "admin":     {"password": "admin_password",     "role": "admin"},
+}
+# Pre-hash at startup (done once, not per-request)
+_HASHED_USERS = {
+    u: {"hashed_password": _bcrypt.hashpw(v["password"].encode(), _bcrypt.gensalt()), "role": v["role"]}
+    for u, v in _USERS.items()
+}
+
+
+def _create_token(username: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    return jwt.encode({"sub": username, "role": role, "exp": expire}, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+async def get_current_user(request: Request) -> dict:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = auth[7:]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        role: str     = payload.get("role")
+        if not username or not role:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return {"username": username, "role": role}
+
+
+def require_role(*roles: str):
+    """Return a FastAPI dependency that enforces the given role(s)."""
+    async def _check(user: dict = Depends(get_current_user)):
+        if user["role"] not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+    return _check
+
+
+_ANY_AUTHED  = require_role("ml_user", "customer", "admin")
+_CUSTOMER    = require_role("customer", "admin")
+
 
 # ---------------------------------------------------------------------------
 # MinIO client
@@ -127,6 +188,7 @@ class HealthResponse(BaseModel):
     status: str
     minio: str
     detector: str
+    frontend: str
     timestamp: str
 
 
@@ -247,39 +309,105 @@ async def startup_event():
 
 
 # ---------------------------------------------------------------------------
-# Public OpenAPI spec — only customer-facing endpoints
+# Role-scoped OpenAPI specs (served to the frontend after login)
+# ml_user  : GET /models, POST /predict
+# customer : ml_user paths + POST /models/{model_id}/upload + GET /audit/{model_id} + GET /reports/*
+# admin    : full spec (all paths, including those not exposed to other roles)
 # ---------------------------------------------------------------------------
-_PUBLIC_PATHS = {"/health", "/analyze", "/predict"}
+_ML_USER_PATHS  = {"/models", "/predict"}
+_CUSTOMER_PATHS = _ML_USER_PATHS | {
+    "/models/{model_id}/upload",
+    "/audit/{model_id}",
+    "/reports/{model_id}",
+    "/reports/{model_id}/{report_key}",
+}
+
+
+def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
+    spec = app.openapi()
+    if allowed_paths is None:
+        return spec
+    return {**spec, "paths": {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}}
+
+
+@app.get("/openapi-ml.json", include_in_schema=False)
+async def openapi_ml():
+    return _filtered_spec(_ML_USER_PATHS)
+
+
+@app.get("/openapi-customer.json", include_in_schema=False)
+async def openapi_customer():
+    return _filtered_spec(_CUSTOMER_PATHS)
+
+
+@app.get("/openapi-admin.json", include_in_schema=False)
+async def openapi_admin_spec():
+    return _filtered_spec()
+
 
 @app.get("/openapi-public.json", include_in_schema=False)
 async def openapi_public():
-    spec = app.openapi()
-    public_spec = {
-        **spec,
-        "paths": {
-            path: ops
-            for path, ops in spec.get("paths", {}).items()
-            if path in _PUBLIC_PATHS
-        },
-    }
-    return public_spec
+    return _filtered_spec({"/health"})
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    username: str
+
+
+@app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
+async def login(form: OAuth2PasswordRequestForm = Depends()):
+    """Issue a JWT for a valid username/password pair."""
+    user = _HASHED_USERS.get(form.username)
+    if not user or not _bcrypt.checkpw(form.password.encode(), user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    token = _create_token(form.username, user["role"])
+    return TokenResponse(access_token=token, role=user["role"], username=form.username)
+
+
+@app.get("/auth/me", tags=["auth"])
+async def whoami(user: dict = Depends(get_current_user)):
+    """Return the currently authenticated user's identity and role."""
+    return user
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health")
 async def health():
+    """Public liveness probe — returns minimal status only."""
+    return {"status": "ok"}
+
+
+@app.get("/health/detail", response_model=HealthResponse)
+async def health_detail(_user: dict = Depends(_ANY_AUTHED)):
+    """Detailed health check including MinIO, detector, and frontend — requires auth."""
     minio_ok = "ok"
     try:
         get_minio().list_buckets()
     except Exception as exc:
         minio_ok = f"error: {exc}"
 
+    frontend_ok = "ok"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("http://frontend:80/", timeout=3)
+            if r.status_code >= 400:
+                frontend_ok = f"error: HTTP {r.status_code}"
+    except Exception as exc:
+        frontend_ok = f"error: {exc}"
+
     return HealthResponse(
         status="ok",
         minio=minio_ok,
         detector="loaded" if _detector is not None else "not loaded",
+        frontend=frontend_ok,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -307,7 +435,8 @@ async def stats():
 
 
 @app.post("/analyze", response_model=RiskResponse)
-async def analyze_query(req: QueryRequest, background_tasks: BackgroundTasks):
+async def analyze_query(req: QueryRequest, background_tasks: BackgroundTasks,
+                        _user: dict = Depends(_ANY_AUTHED)):
     """
     Analyze an incoming ML API query for theft/extraction patterns.
     Stores audit log in MinIO; stores attack report for HIGH/CRITICAL events.
@@ -390,7 +519,8 @@ async def register_model(reg: ModelRegistration):
 
 
 @app.post("/models/{model_id}/upload")
-async def upload_model_artifact(model_id: str, file: UploadFile = File(...)):
+async def upload_model_artifact(model_id: str, file: UploadFile = File(...),
+                                _user: dict = Depends(_CUSTOMER)):
     """Upload a binary model artifact (e.g., .pkl, .onnx) to MinIO."""
     mc = get_minio()
     content = await file.read()
@@ -422,7 +552,7 @@ async def get_model_info(model_id: str):
 
 
 @app.get("/models")
-async def list_models():
+async def list_models(_user: dict = Depends(_ANY_AUTHED)):
     """List all registered models from MinIO."""
     mc = get_minio()
     models = []
@@ -437,7 +567,8 @@ async def list_models():
 
 
 @app.get("/audit/{model_id}")
-async def list_audit_logs(model_id: str, date: Optional[str] = None):
+async def list_audit_logs(model_id: str, date: Optional[str] = None,
+                          _user: dict = Depends(_CUSTOMER)):
     """List audit log entries for a model (optionally filtered by date YYYY-MM-DD)."""
     mc = get_minio()
     prefix = f"{model_id}/{date}/" if date else f"{model_id}/"
@@ -456,7 +587,7 @@ async def list_audit_logs(model_id: str, date: Optional[str] = None):
 
 
 @app.get("/reports/{model_id}")
-async def list_attack_reports(model_id: str):
+async def list_attack_reports(model_id: str, _user: dict = Depends(_CUSTOMER)):
     """List stored attack reports (HIGH/CRITICAL events) for a model."""
     mc = get_minio()
     prefix = f"{model_id}/"
@@ -475,7 +606,7 @@ async def list_attack_reports(model_id: str):
 
 
 @app.get("/reports/{model_id}/{report_key:path}")
-async def get_attack_report(model_id: str, report_key: str):
+async def get_attack_report(model_id: str, report_key: str, _user: dict = Depends(_CUSTOMER)):
     """Fetch the full content of a specific attack report from MinIO."""
     mc = get_minio()
     key = f"{model_id}/{report_key}"
@@ -533,7 +664,8 @@ class PredictRequest(BaseModel):
 
 
 @app.post("/predict")
-async def predict(req: PredictRequest, background_tasks: BackgroundTasks):
+async def predict(req: PredictRequest, background_tasks: BackgroundTasks,
+                  _user: dict = Depends(_ANY_AUTHED)):
     """
     Run inference against the mock sentiment model AND apply ModelGuard anomaly
     detection.  Returns the model prediction together with a risk assessment and

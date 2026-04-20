@@ -4,12 +4,16 @@ Internal tool for platform operators: health monitoring, audit log review,
 and attack report investigation.
 """
 
+import os
+
 import httpx
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-API_BASE = "http://backend:8000"
+API_BASE  = "http://backend:8000"
+_OE_USER  = os.getenv("OE_ADMIN_USER",     "admin")
+_OE_PASS  = os.getenv("OE_ADMIN_PASSWORD", "admin_password")
 
 st.set_page_config(
     page_title="ModelGuard OE Dashboard",
@@ -21,9 +25,24 @@ st.set_page_config(
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_token() -> str:
+    if "oe_token" not in st.session_state:
+        r = httpx.post(f"{API_BASE}/auth/login",
+                       data={"username": _OE_USER, "password": _OE_PASS}, timeout=5)
+        r.raise_for_status()
+        st.session_state["oe_token"] = r.json()["access_token"]
+    return st.session_state["oe_token"]
+
+
 def api_get(path: str, params: dict | None = None):
     try:
-        r = httpx.get(f"{API_BASE}{path}", params=params, timeout=5)
+        token = _get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        r = httpx.get(f"{API_BASE}{path}", params=params, headers=headers, timeout=5)
+        if r.status_code == 401:
+            del st.session_state["oe_token"]
+            headers["Authorization"] = f"Bearer {_get_token()}"
+            r = httpx.get(f"{API_BASE}{path}", params=params, headers=headers, timeout=5)
         r.raise_for_status()
         return r.json()
     except Exception as exc:
@@ -51,15 +70,17 @@ page = st.sidebar.radio(
 # Live health indicator in sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar.expander("Live System Health", expanded=True):
-    health = api_get("/health")
+    health = api_get("/health/detail")
     if health:
-        api_ok    = health.get("status", "unknown") == "ok"
-        minio_ok  = health.get("minio", "unknown") == "ok"
-        det_ok    = health.get("detector", "unknown") == "loaded"
+        api_ok      = health.get("status",   "unknown") == "ok"
+        minio_ok    = health.get("minio",    "unknown") == "ok"
+        det_ok      = health.get("detector", "unknown") == "loaded"
+        frontend_ok = health.get("frontend", "unknown") == "ok"
 
-        st.write(f"**API**      {'✅' if api_ok   else '❌'} {health.get('status', '?')}")
-        st.write(f"**MinIO**    {'✅' if minio_ok  else '❌'} {health.get('minio', '?')}")
-        st.write(f"**Detector** {'✅' if det_ok    else '❌'} {health.get('detector', '?')}")
+        st.write(f"**Frontend** {'✅' if frontend_ok else '❌'} {health.get('frontend', '?')}")
+        st.write(f"**API**      {'✅' if api_ok      else '❌'} {health.get('status',   '?')}")
+        st.write(f"**MinIO**    {'✅' if minio_ok    else '❌'} {health.get('minio',    '?')}")
+        st.write(f"**Detector** {'✅' if det_ok      else '❌'} {health.get('detector', '?')}")
     else:
         st.warning("Backend unreachable")
 
@@ -70,15 +91,16 @@ with st.sidebar.expander("Live System Health", expanded=True):
 if page == "System Health":
     st.title("System Health")
 
-    health = api_get("/health")
+    health = api_get("/health/detail")
     if not health:
         st.error("Cannot reach the backend. Is `modelguard-backend` running?")
         st.stop()
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("API Status",      health.get("status",   "—").upper())
-    col2.metric("MinIO",           health.get("minio",    "—").upper())
-    col3.metric("Detection Engine",health.get("detector", "—").upper())
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Frontend",        health.get("frontend", "—").upper())
+    col2.metric("API Status",      health.get("status",   "—").upper())
+    col3.metric("MinIO",           health.get("minio",    "—").upper())
+    col4.metric("Detection Engine",health.get("detector", "—").upper())
 
     st.divider()
     st.subheader("Raw Health Payload")
