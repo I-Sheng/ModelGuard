@@ -77,10 +77,10 @@ with st.sidebar.expander("Live System Health", expanded=True):
         det_ok      = health.get("detector", "unknown") == "loaded"
         frontend_ok = health.get("frontend", "unknown") == "ok"
 
+        st.write(f"**Frontend** {'✅' if frontend_ok else '❌'} {health.get('frontend', '?')}")
         st.write(f"**API**      {'✅' if api_ok      else '❌'} {health.get('status',   '?')}")
         st.write(f"**MinIO**    {'✅' if minio_ok    else '❌'} {health.get('minio',    '?')}")
         st.write(f"**Detector** {'✅' if det_ok      else '❌'} {health.get('detector', '?')}")
-        st.write(f"**Frontend** {'✅' if frontend_ok else '❌'} {health.get('frontend', '?')}")
     else:
         st.warning("Backend unreachable")
 
@@ -97,10 +97,10 @@ if page == "System Health":
         st.stop()
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("API Status",      health.get("status",   "—").upper())
-    col2.metric("MinIO",           health.get("minio",    "—").upper())
-    col3.metric("Detection Engine",health.get("detector", "—").upper())
-    col4.metric("Frontend",        health.get("frontend", "—").upper())
+    col1.metric("Frontend",        health.get("frontend", "—").upper())
+    col2.metric("API Status",      health.get("status",   "—").upper())
+    col3.metric("MinIO",           health.get("minio",    "—").upper())
+    col4.metric("Detection Engine",health.get("detector", "—").upper())
 
     st.divider()
     st.subheader("Raw Health Payload")
