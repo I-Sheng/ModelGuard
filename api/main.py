@@ -305,11 +305,12 @@ async def startup_event():
 # ---------------------------------------------------------------------------
 # Role-scoped OpenAPI specs (served to the frontend after login)
 # ml_user  : GET /models, POST /predict
-# customer : ml_user paths + GET /audit/{model_id} + GET /reports/*
+# customer : ml_user paths + POST /models/{model_id}/upload + GET /audit/{model_id} + GET /reports/*
 # admin    : full spec (all paths, including those not exposed to other roles)
 # ---------------------------------------------------------------------------
 _ML_USER_PATHS  = {"/models", "/predict"}
 _CUSTOMER_PATHS = _ML_USER_PATHS | {
+    "/models/{model_id}/upload",
     "/audit/{model_id}",
     "/reports/{model_id}",
     "/reports/{model_id}/{report_key}",
@@ -318,9 +319,21 @@ _CUSTOMER_PATHS = _ML_USER_PATHS | {
 
 def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
     spec = app.openapi()
-    if allowed_paths is None:
-        return spec
-    return {**spec, "paths": {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}}
+    if allowed_paths is not None:
+        filtered_paths = {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}
+        spec = {**spec, "paths": filtered_paths}
+    # Strip OAuth2 security scheme so Swagger UI hides the Authorize button and
+    # lock icons — auth is handled by the login page, not the Swagger UI flow.
+    components = spec.get("components", {})
+    if "securitySchemes" in components:
+        spec = {**spec, "components": {k: v for k, v in components.items() if k != "securitySchemes"}}
+    cleaned_paths = {}
+    for path, ops in spec.get("paths", {}).items():
+        cleaned_ops = {}
+        for method, op in ops.items():
+            cleaned_ops[method] = {k: v for k, v in op.items() if k != "security"} if isinstance(op, dict) else op
+        cleaned_paths[path] = cleaned_ops
+    return {**spec, "paths": cleaned_paths}
 
 
 @app.get("/openapi-ml.json", include_in_schema=False)
@@ -495,7 +508,8 @@ async def register_model(reg: ModelRegistration):
 
 
 @app.post("/models/{model_id}/upload")
-async def upload_model_artifact(model_id: str, file: UploadFile = File(...)):
+async def upload_model_artifact(model_id: str, file: UploadFile = File(...),
+                                _user: dict = Depends(_CUSTOMER)):
     """Upload a binary model artifact (e.g., .pkl, .onnx) to MinIO."""
     mc = get_minio()
     content = await file.read()
