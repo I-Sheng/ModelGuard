@@ -6,9 +6,9 @@
   <title>ModelGuard AI — SwaggerAI</title>
   <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
   <style>
-    /* ── Brand bar ── */
     body { margin: 0; font-family: sans-serif; background: #f8fafc; }
 
+    /* ── Brand bar ── */
     #brand-bar {
       display: flex;
       align-items: center;
@@ -19,13 +19,7 @@
       box-shadow: 0 1px 4px rgba(0,0,0,0.06);
     }
     #brand-bar .shield { font-size: 28px; }
-    #brand-bar h1 {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 700;
-      color: #1e293b;
-      letter-spacing: 0.03em;
-    }
+    #brand-bar h1 { margin: 0; font-size: 20px; font-weight: 700; color: #1e293b; letter-spacing: 0.03em; }
     #brand-bar .badge {
       margin-left: auto;
       background: #2563eb;
@@ -36,22 +30,88 @@
       border-radius: 12px;
       letter-spacing: 0.05em;
     }
-    #brand-bar .sub {
-      font-size: 12px;
-      color: #64748b;
-      margin-top: 2px;
-    }
+    #brand-bar .sub { font-size: 12px; color: #64748b; margin-top: 2px; }
     #brand-bar .text { display: flex; flex-direction: column; }
 
-    /* ── Description banner ── */
-    #desc-bar {
+    /* ── User info bar ── */
+    #user-bar {
+      display: none;
+      align-items: center;
+      gap: 10px;
       background: #f1f5f9;
-      color: #475569;
-      font-size: 13px;
-      padding: 10px 24px;
       border-bottom: 1px solid #e2e8f0;
+      padding: 8px 24px;
+      font-size: 13px;
+      color: #475569;
     }
-    #desc-bar strong { color: #1e293b; }
+    #user-bar .role-badge {
+      background: #2563eb;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    #user-bar .role-badge.customer { background: #7c3aed; }
+    #user-bar button {
+      margin-left: auto;
+      background: none;
+      border: 1px solid #cbd5e1;
+      color: #475569;
+      font-size: 12px;
+      padding: 4px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #user-bar button:hover { background: #e2e8f0; }
+
+    /* ── Login overlay ── */
+    #login-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    #login-card {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 36px 40px;
+      width: 360px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    }
+    #login-card h2 { margin: 0 0 6px; font-size: 20px; color: #1e293b; }
+    #login-card p  { margin: 0 0 24px; font-size: 13px; color: #64748b; }
+    #login-card label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px; }
+    #login-card input {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-bottom: 14px;
+      box-sizing: border-box;
+      outline: none;
+    }
+    #login-card input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+    #login-card button {
+      width: 100%;
+      padding: 10px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    #login-card button:hover { background: #1d4ed8; }
+    #login-error { color: #dc2626; font-size: 13px; margin-top: 10px; min-height: 18px; }
 
     /* ── Swagger UI overrides ── */
     #swagger-ui { background: #f8fafc; }
@@ -59,6 +119,8 @@
   </style>
 </head>
 <body>
+
+  <!-- Brand bar (always visible) -->
   <div id="brand-bar">
     <span class="shield">🛡️</span>
     <div class="text">
@@ -68,43 +130,121 @@
     <span class="badge">v0.2.0-oss</span>
   </div>
 
-  <div id="desc-bar">
-    <strong>SwaggerAI</strong> renders the live OpenAPI spec from the ModelGuard backend.
-    Use <strong>POST /analyze</strong> or <strong>POST /predict</strong> to submit queries and see
-    real-time risk scores. Use the <strong>Models</strong> group to register and manage protected models.
-    All calls are audited in MinIO.
+  <!-- Authenticated user bar (shown after login) -->
+  <div id="user-bar">
+    <span id="user-name"></span>
+    <span id="user-role-badge" class="role-badge"></span>
+    <button onclick="doLogout()">Sign out</button>
   </div>
 
+  <!-- Login overlay (shown until authenticated) -->
+  <div id="login-overlay">
+    <div id="login-card">
+      <h2>Sign in to ModelGuard</h2>
+      <p>Enter your credentials to access the API console.</p>
+      <label for="username">Username</label>
+      <input id="username" type="text" placeholder="e.g. ml_user" autocomplete="username" />
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter') doLogin()" />
+      <button onclick="doLogin()">Sign in</button>
+      <div id="login-error"></div>
+    </div>
+  </div>
+
+  <!-- Swagger UI container -->
   <div id="swagger-ui"></div>
 
   <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
   <script>
-    window.onload = () => {
+    const TOKEN_KEY = 'mg_token';
+    const ROLE_KEY  = 'mg_role';
+    const USER_KEY  = 'mg_user';
+
+    async function doLogin() {
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      const errEl    = document.getElementById('login-error');
+      errEl.textContent = '';
+
+      if (!username || !password) {
+        errEl.textContent = 'Please enter username and password.';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          errEl.textContent = body.detail || 'Login failed. Check your credentials.';
+          return;
+        }
+
+        const data = await res.json();
+        sessionStorage.setItem(TOKEN_KEY, data.access_token);
+        sessionStorage.setItem(ROLE_KEY,  data.role);
+        sessionStorage.setItem(USER_KEY,  data.username);
+        showApp(data.access_token, data.role, data.username);
+      } catch (e) {
+        errEl.textContent = 'Network error. Is the backend running?';
+      }
+    }
+
+    function doLogout() {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(ROLE_KEY);
+      sessionStorage.removeItem(USER_KEY);
+      location.reload();
+    }
+
+    function showApp(token, role, username) {
+      document.getElementById('login-overlay').style.display = 'none';
+
+      const userBar  = document.getElementById('user-bar');
+      const roleBadge = document.getElementById('user-role-badge');
+      document.getElementById('user-name').textContent = username;
+      roleBadge.textContent = role.replace('_', ' ');
+      if (role === 'customer') roleBadge.classList.add('customer');
+      userBar.style.display = 'flex';
+
+      const specUrl = role === 'customer' ? '/api/openapi-customer.json' : '/api/openapi-ml.json';
+
       SwaggerUIBundle({
-        // Fetch the OpenAPI spec directly from the backend (proxied by nginx)
-        url: "/api/openapi-public.json",
-        dom_id: "#swagger-ui",
+        url: specUrl,
+        dom_id: '#swagger-ui',
         deepLinking: true,
         presets: [
           SwaggerUIBundle.presets.apis,
           SwaggerUIStandalonePreset,
         ],
-        layout: "StandaloneLayout",
-        // Point "Try it out" requests at /api/* which nginx proxies to the backend
+        layout: 'StandaloneLayout',
         requestInterceptor: (req) => {
-          req.url = req.url.replace("http://backend:8000", "");
-          if (!req.url.startsWith("/api/")) {
-            req.url = "/api" + req.url;
+          req.url = req.url.replace('http://backend:8000', '');
+          if (!req.url.startsWith('/api/')) {
+            req.url = '/api' + req.url;
           }
+          req.headers['Authorization'] = `Bearer ${token}`;
           return req;
         },
-        // Expand the two most-used sections by default
-        docExpansion: "list",
+        docExpansion: 'list',
         defaultModelsExpandDepth: 1,
         tryItOutEnabled: true,
       });
-    };
+    }
+
+    // Restore session if token already exists
+    const savedToken = sessionStorage.getItem(TOKEN_KEY);
+    const savedRole  = sessionStorage.getItem(ROLE_KEY);
+    const savedUser  = sessionStorage.getItem(USER_KEY);
+    if (savedToken && savedRole && savedUser) {
+      showApp(savedToken, savedRole, savedUser);
+    }
   </script>
 </body>
 </html>
