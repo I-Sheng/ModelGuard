@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, BackgroundTasks, Depends
 from fastapi.openapi.utils import get_openapi
@@ -187,6 +188,7 @@ class HealthResponse(BaseModel):
     status: str
     minio: str
     detector: str
+    frontend: str
     timestamp: str
 
 
@@ -385,10 +387,20 @@ async def health():
     except Exception as exc:
         minio_ok = f"error: {exc}"
 
+    frontend_ok = "ok"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("http://frontend:80/", timeout=3)
+            if r.status_code >= 400:
+                frontend_ok = f"error: HTTP {r.status_code}"
+    except Exception as exc:
+        frontend_ok = f"error: {exc}"
+
     return HealthResponse(
         status="ok",
         minio=minio_ok,
         detector="loaded" if _detector is not None else "not loaded",
+        frontend=frontend_ok,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
