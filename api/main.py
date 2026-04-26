@@ -60,9 +60,9 @@ JWT_EXPIRE_MINUTES = 60
 # Demo users: username → {password, role}
 # Roles: "ml_user" (predict + models), "customer" (+ audit + reports), "admin" (all)
 _USERS: dict[str, dict] = {
-    "ml_user":   {"password": "ml_password",       "role": "ml_user"},
-    "customer1": {"password": "customer_password",  "role": "customer"},
-    "admin":     {"password": "admin_password",     "role": "admin"},
+    "ml_user":   {"password": os.getenv("ML_USER_PASSWORD",       "ml_password"),       "role": "ml_user"},
+    "customer1": {"password": os.getenv("CUSTOMER1_PASSWORD",     "customer_password"), "role": "customer"},
+    "admin":     {"password": os.getenv("ADMIN_PASSWORD",         "admin_password"),    "role": "admin"},
 }
 # Pre-hash at startup (done once, not per-request)
 _HASHED_USERS = {
