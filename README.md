@@ -213,7 +213,7 @@ ModelGuard/
 ├── images/
 │   └── Architecture_Diagram.png
 ├── README.md
-└── Technical_Design.md
+└── docs/
 ```
 
 ---
@@ -273,7 +273,7 @@ Risk thresholds:
 
 ## Roadmap
 
-See [`Technical_Design.md`](Technical_Design.md) for the full design. Planned next steps:
+See [`Technical_Design.md`](docs/Technical_Design.md) for the full design. Planned next steps:
 
 - [ ] Persistent query history (replace in-memory window with Redis or TimescaleDB)
 - [ ] Per-client rate tracking across requests

@@ -83,7 +83,7 @@ Streamlit app that calls the backend API using an admin JWT obtained at startup.
 
 ## Threat Model
 
-Three active threats in `Threat_Model.md`:
+Three active threats in `docs/Threat_Model.md`:
 
 - **T-01** — Model artifact overwrite: `POST /models/{model_id}/upload` has no ownership check; any authenticated customer can overwrite another user's artifact.
 - **T-02** — Mutable audit logs: MinIO has no object lock (WORM), so audit logs that feed attack report generation can be deleted or modified.

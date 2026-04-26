@@ -1,5 +1,5 @@
 """
-Security tests — mapped to Threat_Model.md.
+Security tests — mapped to docs/Threat_Model.md.
 
 MinIO is replaced with a MagicMock; no live services are required.
 All credentials (usernames and passwords) are loaded from .env via dotenv_values.
