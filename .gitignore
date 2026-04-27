@@ -21,5 +21,9 @@ minio_data/
 # Environment overrides
 .env
 
+# Bun / Node
+tests/node_modules/
+tests/bun.lock
+
 # OS
 .DS_Store

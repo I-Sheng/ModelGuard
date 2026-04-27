@@ -21,9 +21,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from starlette.requests import Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from jose import JWTError, jwt
 import bcrypt as _bcrypt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from minio import Minio
 from minio.error import S3Error
 from sklearn.ensemble import IsolationForest
@@ -37,11 +40,16 @@ logger = logging.getLogger("modelguard")
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="ModelGuard AI",
     description="Real-time ML model theft detection API",
     version="0.1.0-oss",
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -167,6 +175,7 @@ def get_detector() -> IsolationForest:
 # Schemas
 # ---------------------------------------------------------------------------
 class QueryRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_id: str = Field(..., description="Target model identifier")
     query_text: str = Field(..., description="Raw query/prompt sent to the model")
     client_id: Optional[str] = Field(None, description="Caller identifier for rate tracking")
@@ -174,6 +183,7 @@ class QueryRequest(BaseModel):
 
 
 class RiskResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     query_id: str
     model_id: str
     risk_score: float          # 0–100
@@ -200,6 +210,7 @@ class StatsResponse(BaseModel):
 
 
 class ModelRegistration(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_id: str
     name: str
     version: str
@@ -361,7 +372,8 @@ class TokenResponse(BaseModel):
 
 
 @app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
-async def login(form: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("10/minute")
+async def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     """Issue a JWT for a valid username/password pair."""
     user = _HASHED_USERS.get(form.username)
     if not user or not _bcrypt.checkpw(form.password.encode(), user["hashed_password"]):
@@ -657,6 +669,7 @@ def _mock_sentiment(text: str) -> dict:
 
 
 class PredictRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_id: str = Field(..., description="Target model identifier")
     query_text: str = Field(..., description="Text to classify")
     client_id: Optional[str] = Field(None, description="Caller identifier")
