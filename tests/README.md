@@ -4,7 +4,7 @@ TypeScript + Jest tests that hit the **live API** at `http://localhost:8000`.
 
 ## Prerequisites
 
-- Node.js 18+
+- Bun 1.0+
 - The full stack running via Docker Compose
 - A `.env` file at the project root (copy from `.env.example`)
 
@@ -16,20 +16,20 @@ docker compose up --build
 
 # From this directory — install dependencies
 cd tests
-npm install
+bun install
 ```
 
 ## Running Tests
 
 ```bash
-# Run all functional tests
-npm test
+# Run all tests
+bun test
 
 # Run a specific test file
-npx jest functional.test.ts
+bun test security.test.ts
 
 # Run with verbose output
-npm test -- --verbose
+bun test --verbose
 ```
 
 ## Test Files
@@ -37,6 +37,7 @@ npm test -- --verbose
 | File | Description |
 |---|---|
 | `functional.test.ts` | RBAC enforcement — verifies role-based access control on live endpoints |
+| `security.test.ts` | Security tests — asserts each threat mitigation is in place |
 
 ## What Is Tested
 
