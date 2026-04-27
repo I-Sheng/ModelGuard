@@ -5,11 +5,25 @@ __pycache__/
 .venv/
 dist/
 
+# Poetry
+poetry.lock
+.poetry/
+
+# Pytest
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
 # Docker volumes (if bind-mounted locally)
 minio_data/
 
 # Environment overrides
 .env
+
+# Bun / Node
+tests/node_modules/
+tests/bun.lock
 
 # OS
 .DS_Store
