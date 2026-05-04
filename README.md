@@ -94,6 +94,86 @@ curl -s -X POST http://localhost:8000/auth/login \
 
 ---
 
+## CI/CD Pipeline
+
+The repository ships with two GitHub Actions workflows:
+
+| Workflow | File | Trigger | Purpose |
+|---|---|---|---|
+| **CI** | `.github/workflows/ci.yml` | Push to `main` / `dev`, PRs to `main` | Type-check, unit tests, integration tests |
+| **CD** | `.github/workflows/cd.yml` | Push to `main` only | Build Docker images and publish to GHCR |
+
+### Job flow
+
+```
+Push to dev / PR to main          Push to main
+        │                                │
+        ▼                                ▼
+  [typecheck] ──► [unit] ──► [integration]      [build-and-push]
+   tsc --noEmit   pure logic   Docker Compose    backend · frontend · oe-dashboard
+                  no server    full stack test   → ghcr.io/i-sheng/modelguard-*:latest
+                                                 → ghcr.io/i-sheng/modelguard-*:<sha>
+```
+
+### Required GitHub Secrets
+
+Go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Description |
+|---|---|
+| `MINIO_ROOT_USER` | MinIO root username |
+| `MINIO_ROOT_PASSWORD` | MinIO root password |
+| `MINIO_ACCESS_KEY` | MinIO access key |
+| `MINIO_SECRET_KEY` | MinIO secret key |
+| `JWT_SECRET_KEY` | HS256 signing secret |
+| `OE_ADMIN_USER` | OE dashboard admin username |
+| `OE_ADMIN_PASSWORD` | OE dashboard admin password |
+| `ANALYST1_PASSWORD` | Password for the `analyst1` demo user |
+| `PARTNER1_PASSWORD` | Password for the `partner1` demo user |
+| `ADMIN_PASSWORD` | Password for the `admin` demo user |
+
+> `GITHUB_TOKEN` is provided automatically by GitHub Actions — no setup needed for GHCR pushes.
+
+### Running tests locally
+
+```bash
+cd tests
+bun install
+
+# Unit tests only (no Docker needed)
+bunx jest unit.test.ts
+
+# All tests (requires: docker compose up)
+bun run test
+```
+
+### Deploying with pre-built GHCR images
+
+After a successful merge to `main`, the CD workflow publishes three images to GHCR. To run the stack using those images instead of building locally:
+
+```bash
+# Pull the latest images
+docker pull ghcr.io/i-sheng/modelguard-backend:latest
+docker pull ghcr.io/i-sheng/modelguard-frontend:latest
+docker pull ghcr.io/i-sheng/modelguard-oe-dashboard:latest
+
+# Start with the production overlay (uses GHCR images, no local build)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+To pin a deployment to a specific commit SHA:
+
+```bash
+# Replace <sha> with the full commit hash from the CD run
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d \
+  --env-file .env \
+  -e BACKEND_IMAGE=ghcr.io/i-sheng/modelguard-backend:<sha>
+```
+
+Or edit `docker-compose.prod.yml` to replace `:latest` with `:<sha>` before deploying.
+
+---
+
 ## Quick Start
 
 > **No local installs required.** Everything runs inside containers.
@@ -166,8 +246,13 @@ cp .env.example .env
 ```
 ModelGuard/
 ├── docker-compose.yml        # Orchestrates all five services
+├── docker-compose.prod.yml   # Production overlay — uses GHCR images instead of local builds
 ├── .env.example              # Environment variable template
 ├── demo.sh                   # Smoke-test script
+├── .github/
+│   └── workflows/
+│       ├── ci.yml            # CI: typecheck → unit tests → integration tests
+│       └── cd.yml            # CD: build + push Docker images to GHCR (main only)
 ├── api/                      # FastAPI detection backend
 │   ├── Dockerfile
 │   ├── main.py
@@ -181,10 +266,12 @@ ModelGuard/
 │   ├── Dockerfile
 │   ├── app.py
 │   └── requirements.txt
-├── tests/                    # Security tests (TypeScript + Bun)
-│   └── security.test.ts
+├── tests/                    # TypeScript test suite (Jest + Bun)
+│   ├── unit.test.ts          # Pure unit tests — no server needed
+│   ├── functional.test.ts    # RBAC + auth integration tests
+│   └── security.test.ts      # Known-vulnerability tests (T-01 – T-03)
 ├── images/
-│   └── Architecture_Diagram.png
+│   └── modelguard_system_design.svg
 ├── README.md
 └── docs/
 ```
