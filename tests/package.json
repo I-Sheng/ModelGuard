@@ -17,6 +17,6 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "testTimeout": 15000
+    "testTimeout": 120000
   }
 }

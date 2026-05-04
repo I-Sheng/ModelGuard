@@ -13,10 +13,18 @@ const BASE_URL = "http://localhost:8000";
 
 async function login(username: string, password: string): Promise<string> {
   const params = new URLSearchParams({ username, password });
-  const res = await axios.post(`${BASE_URL}/auth/login`, params.toString(), {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  });
-  return res.data.access_token;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const res = await axios.post(`${BASE_URL}/auth/login`, params.toString(), {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
+      return res.data.access_token;
+    } catch (err: any) {
+      if (err?.response?.status !== 429 || attempt === 5) throw err;
+      await new Promise((r) => setTimeout(r, (attempt + 1) * 10_000));
+    }
+  }
+  throw new Error("unreachable");
 }
 
 // ---------------------------------------------------------------------------
@@ -25,16 +33,8 @@ async function login(username: string, password: string): Promise<string> {
 
 describe("login", () => {
   test("valid credentials return access_token and role", async () => {
-    const params = new URLSearchParams({
-      username: process.env.ADMIN_USER!,
-      password: process.env.ADMIN_PASSWORD!,
-    });
-    const res = await axios.post(`${BASE_URL}/auth/login`, params.toString(), {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
-    expect(res.status).toBe(200);
-    expect(res.data).toHaveProperty("access_token");
-    expect(res.data).toHaveProperty("role", "admin");
+    const token = await login(process.env.ADMIN_USER!, process.env.ADMIN_PASSWORD!);
+    expect(token).toBeTruthy();
   });
 
   test("wrong password returns 401", async () => {

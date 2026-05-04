@@ -445,7 +445,7 @@ async def health_detail(_user: dict = Depends(_ANY_AUTHED)):
 
 
 @app.get("/stats", response_model=StatsResponse)
-async def stats():
+async def stats(_user: dict = Depends(_ANY_AUTHED)):
     """Aggregated system statistics for the OE Dashboard."""
     minio_ok = "ok"
     total_partners = 0
