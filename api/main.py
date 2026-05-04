@@ -1,35 +1,35 @@
 """
-ModelGuard AI - API Query Monitor
-Detects model theft attacks via behavioral anomaly detection.
-MinIO is used for: model artifact storage, audit log archival, attack report storage.
+ModelGuard AI - Batch Model Theft Detection API
+Partners submit query logs; ModelGuard detects model extraction campaigns.
+MinIO stores: the Isolation Forest detector model, batch audit logs, theft reports.
 """
 
-import os
 import io
 import json
-import uuid
-import time
 import logging
-from datetime import datetime, timezone, timedelta
+import os
+import pickle
+import time
+import uuid
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, BackgroundTasks, Depends
-from fastapi.openapi.utils import get_openapi
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
-from starlette.requests import Request
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 from jose import JWTError, jwt
 import bcrypt as _bcrypt
-from pydantic import BaseModel, ConfigDict, Field
 from minio import Minio
 from minio.error import S3Error
+from pydantic import BaseModel, ConfigDict, Field
 from sklearn.ensemble import IsolationForest
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.requests import Request
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -44,8 +44,8 @@ limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="ModelGuard AI",
-    description="Real-time ML model theft detection API",
-    version="0.1.0-oss",
+    description="Batch model theft detection — analyze partner query logs for extraction campaigns",
+    version="0.3.0-oss",
 )
 
 app.state.limiter = limiter
@@ -60,19 +60,17 @@ app.add_middleware(
 
 # ---------------------------------------------------------------------------
 # Auth — JWT + role-based access control
+# Roles: "analyst" (read-only), "partner" (submit batches + own audits), "admin" (all)
 # ---------------------------------------------------------------------------
-JWT_SECRET    = os.getenv("JWT_SECRET_KEY", "modelguard-dev-secret-change-in-production")
-JWT_ALGORITHM = "HS256"
+JWT_SECRET         = os.getenv("JWT_SECRET_KEY", "modelguard-dev-secret-change-in-production")
+JWT_ALGORITHM      = "HS256"
 JWT_EXPIRE_MINUTES = 60
 
-# Demo users: username → {password, role}
-# Roles: "ml_user" (predict + models), "customer" (+ audit + reports), "admin" (all)
 _USERS: dict[str, dict] = {
-    "ml_user":   {"password": os.getenv("ML_USER_PASSWORD",       "ml_password"),       "role": "ml_user"},
-    "customer1": {"password": os.getenv("CUSTOMER1_PASSWORD",     "customer_password"), "role": "customer"},
-    "admin":     {"password": os.getenv("ADMIN_PASSWORD",         "admin_password"),    "role": "admin"},
+    "analyst1": {"password": os.getenv("ANALYST1_PASSWORD", "analyst_password"), "role": "analyst"},
+    "partner1": {"password": os.getenv("PARTNER1_PASSWORD", "partner_password"), "role": "partner"},
+    "admin":    {"password": os.getenv("ADMIN_PASSWORD",    "admin_password"),   "role": "admin"},
 }
-# Pre-hash at startup (done once, not per-request)
 _HASHED_USERS = {
     u: {"hashed_password": _bcrypt.hashpw(v["password"].encode(), _bcrypt.gensalt()), "role": v["role"]}
     for u, v in _USERS.items()
@@ -92,7 +90,7 @@ async def get_current_user(request: Request) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str = payload.get("sub")
-        role: str     = payload.get("role")
+        role: str = payload.get("role")
         if not username or not role:
             raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
@@ -109,20 +107,21 @@ def require_role(*roles: str):
     return _check
 
 
-_ANY_AUTHED  = require_role("ml_user", "customer", "admin")
-_CUSTOMER    = require_role("customer", "admin")
-
+_ANY_AUTHED = require_role("analyst", "partner", "admin")
+_PARTNER    = require_role("partner", "admin")
 
 # ---------------------------------------------------------------------------
 # MinIO client
 # ---------------------------------------------------------------------------
-MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT",   "minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 
-BUCKET_MODELS   = "modelguard-models"
-BUCKET_AUDITLOG = "modelguard-auditlog"
-BUCKET_REPORTS  = "modelguard-reports"
+BUCKET_DETECTORS = "modelguard-detectors"
+BUCKET_AUDITLOG  = "modelguard-auditlog"
+BUCKET_REPORTS   = "modelguard-reports"
+
+DETECTOR_KEY = "v1/detector.pkl"
 
 minio_client: Optional[Minio] = None
 
@@ -141,131 +140,173 @@ def get_minio() -> Minio:
 
 def ensure_buckets() -> None:
     mc = get_minio()
-    for bucket in [BUCKET_MODELS, BUCKET_AUDITLOG, BUCKET_REPORTS]:
+    for bucket in [BUCKET_DETECTORS, BUCKET_AUDITLOG, BUCKET_REPORTS]:
         if not mc.bucket_exists(bucket):
             mc.make_bucket(bucket)
             logger.info("Created bucket: %s", bucket)
 
 
 # ---------------------------------------------------------------------------
-# In-memory anomaly detector (Isolation Forest)
-# Feature vector: [query_length, unique_token_ratio, entropy, request_rate_1m]
+# Isolation Forest detector
+# Feature vector per user (5-dim):
+#   [query_count, unique_input_ratio, avg_input_length, input_entropy, output_diversity]
 # ---------------------------------------------------------------------------
 _detector: Optional[IsolationForest] = None
-_query_window: list[float] = []   # timestamps for rate estimation
 
-NORMAL_SEED = np.random.default_rng(42)
-_TRAIN_DATA = NORMAL_SEED.normal(
-    loc=[120, 0.6, 3.5, 2.0],
-    scale=[40, 0.1, 0.5, 0.8],
-    size=(500, 4),
+_NORMAL_SEED = np.random.default_rng(42)
+_TRAIN_DATA  = np.clip(
+    _NORMAL_SEED.normal(
+        loc=[30.0, 0.60, 100.0, 3.5, 0.45],
+        scale=[10.0, 0.10,  40.0, 0.4, 0.10],
+        size=(500, 5),
+    ),
+    [1.0, 0.0, 1.0, 0.0, 0.0],
+    None,
 )
+
+
+def _save_detector(clf: IsolationForest) -> None:
+    mc = get_minio()
+    data = pickle.dumps(clf)
+    mc.put_object(
+        BUCKET_DETECTORS, DETECTOR_KEY,
+        io.BytesIO(data), length=len(data),
+        content_type="application/octet-stream",
+    )
+    logger.info("Detector saved to MinIO: %s/%s", BUCKET_DETECTORS, DETECTOR_KEY)
+
+
+def _load_detector_from_minio() -> Optional[IsolationForest]:
+    mc = get_minio()
+    try:
+        response = mc.get_object(BUCKET_DETECTORS, DETECTOR_KEY)
+        clf = pickle.loads(response.read())
+        logger.info("Detector loaded from MinIO: %s/%s", BUCKET_DETECTORS, DETECTOR_KEY)
+        return clf
+    except S3Error:
+        return None
 
 
 def get_detector() -> IsolationForest:
     global _detector
     if _detector is None:
-        _detector = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
-        _detector.fit(_TRAIN_DATA)
-        logger.info("Isolation Forest trained on %d synthetic samples.", len(_TRAIN_DATA))
+        _detector = _load_detector_from_minio()
+        if _detector is None:
+            _detector = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+            _detector.fit(_TRAIN_DATA)
+            logger.info("Isolation Forest trained on %d synthetic samples.", len(_TRAIN_DATA))
+            try:
+                _save_detector(_detector)
+            except Exception as exc:
+                logger.warning("Could not persist detector to MinIO: %s", exc)
     return _detector
 
 
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-class QueryRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-    model_id: str = Field(..., description="Target model identifier")
-    query_text: str = Field(..., description="Raw query/prompt sent to the model")
-    client_id: Optional[str] = Field(None, description="Caller identifier for rate tracking")
-    metadata: Optional[dict] = Field(None, description="Extra metadata (IP, user-agent, etc.)")
+class QueryRecord(BaseModel):
+    query_id:   str
+    query_user: str
+    input:      str
+    output:     str
 
 
-class RiskResponse(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-    query_id: str
-    model_id: str
-    risk_score: float          # 0–100
-    risk_level: str            # LOW / MEDIUM / HIGH / CRITICAL
-    anomaly: bool
-    features: dict
-    timestamp: str
-    audit_log_key: str         # MinIO object key where audit record was stored
+class BatchAnalyzeRequest(BaseModel):
+    partner_id:   str = Field(..., description="Partner identifier (AI company submitting the batch)")
+    window_start: str = Field(..., description="ISO 8601 start of the query window")
+    window_end:   str = Field(..., description="ISO 8601 end of the query window")
+    queries: list[QueryRecord] = Field(
+        ..., description="Query records in the window", max_length=100_000
+    )
+
+
+class UserRiskResult(BaseModel):
+    query_user:  str
+    query_count: int
+    risk_score:  float
+    risk_level:  str
+    anomaly:     bool
+    features:    dict
+
+
+class BatchAnalyzeResponse(BaseModel):
+    batch_id:         str
+    partner_id:       str
+    window_start:     str
+    window_end:       str
+    total_queries:    int
+    total_users:      int
+    flagged_users:    int
+    batch_risk_level: str
+    user_results:     list[UserRiskResult]
+    timestamp:        str
+    audit_log_key:    str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    username: str
 
 
 class HealthResponse(BaseModel):
-    status: str
-    minio: str
-    detector: str
-    frontend: str
+    status:    str
+    minio:     str
+    detector:  str
+    frontend:  str
     timestamp: str
 
 
 class StatsResponse(BaseModel):
-    total_models: int
-    detector: str
-    minio: str
-    timestamp: str
-
-
-class ModelRegistration(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-    model_id: str
-    name: str
-    version: str
-    description: Optional[str] = None
-    owner: Optional[str] = None
+    total_partners:         int
+    total_batches_analyzed: int
+    detector:               str
+    minio:                  str
+    timestamp:              str
 
 
 # ---------------------------------------------------------------------------
-# Feature extraction helpers
+# Feature extraction
 # ---------------------------------------------------------------------------
 def _shannon_entropy(text: str) -> float:
     if not text:
         return 0.0
-    freq = {}
+    freq: dict = {}
     for ch in text:
         freq[ch] = freq.get(ch, 0) + 1
     n = len(text)
     return -sum((c / n) * np.log2(c / n) for c in freq.values())
 
 
-def extract_features(query: str, client_id: Optional[str]) -> dict:
-    tokens = query.split()
-    unique_ratio = len(set(tokens)) / max(len(tokens), 1)
-    entropy = _shannon_entropy(query)
-
-    now = time.time()
-    _query_window.append(now)
-    # keep only last 60 seconds
-    _query_window[:] = [t for t in _query_window if now - t <= 60]
-    request_rate = len(_query_window)
-
+def extract_user_features(user_queries: list[QueryRecord]) -> dict:
+    inputs  = [q.input  for q in user_queries]
+    outputs = [q.output for q in user_queries]
+    n = len(user_queries)
     return {
-        "query_length": len(query),
-        "unique_token_ratio": round(unique_ratio, 4),
-        "entropy": round(entropy, 4),
-        "request_rate_1m": request_rate,
+        "query_count":        n,
+        "unique_input_ratio": round(len(set(inputs))  / max(n, 1), 4),
+        "avg_input_length":   round(sum(len(s) for s in inputs) / max(n, 1), 2),
+        "input_entropy":      round(sum(_shannon_entropy(s) for s in inputs) / max(n, 1), 4),
+        "output_diversity":   round(len(set(outputs)) / max(n, 1), 4),
     }
 
 
 def compute_risk_score(anomaly_score: float) -> float:
-    """Map Isolation Forest decision_function score to 0–100 risk (higher = riskier)."""
-    # decision_function returns negative for anomalies; typical range ~ [-0.5, 0.5]
+    """Map Isolation Forest decision_function output to 0–100 risk (higher = riskier)."""
     clamped = max(-0.5, min(0.5, anomaly_score))
-    risk = (0.5 - clamped) / 1.0 * 100
-    return round(risk, 1)
+    return round((0.5 - clamped) / 1.0 * 100, 1)
 
 
 def risk_level(score: float) -> str:
-    if score >= 80:
-        return "CRITICAL"
-    elif score >= 60:
-        return "HIGH"
-    elif score >= 40:
-        return "MEDIUM"
+    if   score >= 80: return "CRITICAL"
+    elif score >= 60: return "HIGH"
+    elif score >= 40: return "MEDIUM"
     return "LOW"
+
+
+_LEVEL_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
 
 
 # ---------------------------------------------------------------------------
@@ -273,30 +314,19 @@ def risk_level(score: float) -> str:
 # ---------------------------------------------------------------------------
 def store_audit_log(record: dict) -> str:
     mc = get_minio()
-    key = f"{record['model_id']}/{record['timestamp'][:10]}/{record['query_id']}.json"
+    key = f"{record['partner_id']}/{record['timestamp'][:10]}/{record['batch_id']}.json"
     data = json.dumps(record, ensure_ascii=False).encode()
-    mc.put_object(
-        BUCKET_AUDITLOG,
-        key,
-        io.BytesIO(data),
-        length=len(data),
-        content_type="application/json",
-    )
+    mc.put_object(BUCKET_AUDITLOG, key, io.BytesIO(data), length=len(data),
+                  content_type="application/json")
     return key
 
 
-def store_attack_report(record: dict) -> str:
+def store_theft_report(record: dict) -> None:
     mc = get_minio()
-    key = f"{record['model_id']}/{record['query_id']}_report.json"
+    key = f"{record['partner_id']}/{record['batch_id']}_report.json"
     data = json.dumps(record, ensure_ascii=False).encode()
-    mc.put_object(
-        BUCKET_REPORTS,
-        key,
-        io.BytesIO(data),
-        length=len(data),
-        content_type="application/json",
-    )
-    return key
+    mc.put_object(BUCKET_REPORTS, key, io.BytesIO(data), length=len(data),
+                  content_type="application/json")
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +334,6 @@ def store_attack_report(record: dict) -> str:
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    # MinIO bucket creation with retry (service may still be starting)
     for attempt in range(10):
         try:
             ensure_buckets()
@@ -315,23 +344,21 @@ async def startup_event():
             time.sleep(3)
     else:
         logger.error("Could not connect to MinIO after 10 attempts.")
-
     get_detector()
 
 
 # ---------------------------------------------------------------------------
-# Role-scoped OpenAPI specs (served to the frontend after login)
-# ml_user  : GET /models, POST /predict
-# customer : ml_user paths + POST /models/{model_id}/upload + GET /audit/{model_id} + GET /reports/*
-# admin    : full spec (all paths, including those not exposed to other roles)
+# Role-scoped OpenAPI specs
+# analyst  : read-only audit + reports
+# partner  : analyst paths + POST /batch/analyze + GET /batch/{batch_id}
+# admin    : full spec
 # ---------------------------------------------------------------------------
-_ML_USER_PATHS  = {"/models", "/predict"}
-_CUSTOMER_PATHS = _ML_USER_PATHS | {
-    "/models/{model_id}/upload",
-    "/audit/{model_id}",
-    "/reports/{model_id}",
-    "/reports/{model_id}/{report_key}",
+_ANALYST_PATHS = {
+    "/audit/{partner_id}",
+    "/reports/{partner_id}",
+    "/reports/{partner_id}/{report_key}",
 }
+_PARTNER_PATHS = _ANALYST_PATHS | {"/batch/analyze", "/batch/{batch_id}"}
 
 
 def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
@@ -341,14 +368,14 @@ def _filtered_spec(allowed_paths: Optional[set] = None) -> dict:
     return {**spec, "paths": {p: ops for p, ops in spec.get("paths", {}).items() if p in allowed_paths}}
 
 
-@app.get("/openapi-ml.json", include_in_schema=False)
-async def openapi_ml():
-    return _filtered_spec(_ML_USER_PATHS)
+@app.get("/openapi-analyst.json", include_in_schema=False)
+async def openapi_analyst():
+    return _filtered_spec(_ANALYST_PATHS)
 
 
-@app.get("/openapi-customer.json", include_in_schema=False)
-async def openapi_customer():
-    return _filtered_spec(_CUSTOMER_PATHS)
+@app.get("/openapi-partner.json", include_in_schema=False)
+async def openapi_partner():
+    return _filtered_spec(_PARTNER_PATHS)
 
 
 @app.get("/openapi-admin.json", include_in_schema=False)
@@ -364,13 +391,6 @@ async def openapi_public():
 # ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    role: str
-    username: str
-
-
 @app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
 @limiter.limit("10/minute")
 async def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
@@ -389,7 +409,7 @@ async def whoami(user: dict = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Operations endpoints
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
@@ -399,7 +419,7 @@ async def health():
 
 @app.get("/health/detail", response_model=HealthResponse)
 async def health_detail(_user: dict = Depends(_ANY_AUTHED)):
-    """Detailed health check including MinIO, detector, and frontend — requires auth."""
+    """Full subsystem health check including MinIO, detector, and frontend — requires auth."""
     minio_ok = "ok"
     try:
         get_minio().list_buckets()
@@ -428,315 +448,185 @@ async def health_detail(_user: dict = Depends(_ANY_AUTHED)):
 async def stats():
     """Aggregated system statistics for the OE Dashboard."""
     minio_ok = "ok"
-    total_models = 0
+    total_partners = 0
+    total_batches  = 0
     try:
         mc = get_minio()
         mc.list_buckets()
-        objects = mc.list_objects(BUCKET_MODELS, recursive=False)
-        for _ in objects:
-            total_models += 1
+        partner_ids: set[str] = set()
+        for obj in mc.list_objects(BUCKET_AUDITLOG, recursive=True):
+            parts = obj.object_name.split("/")
+            if parts[0]:
+                partner_ids.add(parts[0])
+                total_batches += 1
+        total_partners = len(partner_ids)
     except Exception as exc:
         minio_ok = f"error: {exc}"
 
     return StatsResponse(
-        total_models=total_models,
+        total_partners=total_partners,
+        total_batches_analyzed=total_batches,
         detector="loaded" if _detector is not None else "not loaded",
         minio=minio_ok,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
 
-@app.post("/analyze", response_model=RiskResponse)
-async def analyze_query(req: QueryRequest, background_tasks: BackgroundTasks,
-                        _user: dict = Depends(_ANY_AUTHED)):
+# ---------------------------------------------------------------------------
+# Batch detection endpoint
+# ---------------------------------------------------------------------------
+@app.post("/batch/analyze", response_model=BatchAnalyzeResponse, tags=["detection"])
+async def batch_analyze(
+    req: BatchAnalyzeRequest,
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(_PARTNER),
+):
     """
-    Analyze an incoming ML API query for theft/extraction patterns.
-    Stores audit log in MinIO; stores attack report for HIGH/CRITICAL events.
+    Analyze a batch of query records for model theft patterns.
+    Per-user behavioral features are extracted and scored by the Isolation Forest.
+    Returns per-user risk scores and a batch-level risk assessment.
     """
-    query_id = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
     ts = datetime.now(timezone.utc).isoformat()
 
-    features = extract_features(req.query_text, req.client_id)
-    feat_vec = np.array([[
-        features["query_length"],
-        features["unique_token_ratio"],
-        features["entropy"],
-        features["request_rate_1m"],
-    ]])
+    # Group queries by user
+    by_user: dict[str, list[QueryRecord]] = defaultdict(list)
+    for q in req.queries:
+        by_user[q.query_user].append(q)
 
     detector = get_detector()
-    pred = detector.predict(feat_vec)[0]          # 1 = normal, -1 = anomaly
-    score_raw = float(detector.decision_function(feat_vec)[0])
-    is_anomaly = bool(pred == -1)
-    risk = compute_risk_score(score_raw)
-    level = risk_level(risk)
+    user_results: list[UserRiskResult] = []
+
+    for query_user, user_queries in by_user.items():
+        features = extract_user_features(user_queries)
+        feat_vec = np.array([[
+            features["query_count"],
+            features["unique_input_ratio"],
+            features["avg_input_length"],
+            features["input_entropy"],
+            features["output_diversity"],
+        ]])
+        pred      = detector.predict(feat_vec)[0]           # 1 = normal, -1 = anomaly
+        score_raw = float(detector.decision_function(feat_vec)[0])
+        is_anomaly = bool(pred == -1)
+        risk  = compute_risk_score(score_raw)
+        level = risk_level(risk)
+        user_results.append(UserRiskResult(
+            query_user=query_user,
+            query_count=features["query_count"],
+            risk_score=risk,
+            risk_level=level,
+            anomaly=is_anomaly,
+            features=features,
+        ))
+
+    batch_risk = (
+        max(user_results, key=lambda u: _LEVEL_ORDER[u.risk_level]).risk_level
+        if user_results else "LOW"
+    )
+    flagged = sum(1 for u in user_results if u.risk_level in ("HIGH", "CRITICAL"))
 
     audit_record = {
-        "query_id": query_id,
-        "model_id": req.model_id,
-        "client_id": req.client_id,
-        "query_text": req.query_text[:500],  # truncate PII
-        "features": features,
-        "risk_score": risk,
-        "risk_level": level,
-        "anomaly": is_anomaly,
-        "timestamp": ts,
-        "metadata": req.metadata or {},
+        "batch_id":         batch_id,
+        "partner_id":       req.partner_id,
+        "window_start":     req.window_start,
+        "window_end":       req.window_end,
+        "total_queries":    len(req.queries),
+        "total_users":      len(by_user),
+        "flagged_users":    flagged,
+        "batch_risk_level": batch_risk,
+        "user_results":     [u.model_dump() for u in user_results],
+        "timestamp":        ts,
     }
 
-    # Store audit log in MinIO (always)
     try:
         log_key = store_audit_log(audit_record)
     except Exception as exc:
         logger.error("Failed to store audit log: %s", exc)
         log_key = "minio-unavailable"
 
-    # For HIGH/CRITICAL events, also store a dedicated attack report
-    if is_anomaly and level in ("HIGH", "CRITICAL"):
-        background_tasks.add_task(store_attack_report, audit_record)
+    if batch_risk in ("HIGH", "CRITICAL"):
+        background_tasks.add_task(store_theft_report, audit_record)
 
-    return RiskResponse(
-        query_id=query_id,
-        model_id=req.model_id,
-        risk_score=risk,
-        risk_level=level,
-        anomaly=is_anomaly,
-        features=features,
+    return BatchAnalyzeResponse(
+        batch_id=batch_id,
+        partner_id=req.partner_id,
+        window_start=req.window_start,
+        window_end=req.window_end,
+        total_queries=len(req.queries),
+        total_users=len(by_user),
+        flagged_users=flagged,
+        batch_risk_level=batch_risk,
+        user_results=user_results,
         timestamp=ts,
         audit_log_key=log_key,
     )
 
 
-@app.post("/models/register")
-async def register_model(reg: ModelRegistration):
-    """Register a model — stores its metadata as a JSON artifact in MinIO."""
+@app.get("/batch/{batch_id}", tags=["detection"])
+async def get_batch_result(batch_id: str, _user: dict = Depends(_PARTNER)):
+    """Retrieve the stored result for a previously analyzed batch."""
     mc = get_minio()
-    key = f"{reg.model_id}/metadata.json"
-    payload = {
-        **reg.model_dump(),
-        "registered_at": datetime.now(timezone.utc).isoformat(),
-    }
-    data = json.dumps(payload, ensure_ascii=False).encode()
     try:
-        mc.put_object(
-            BUCKET_MODELS,
-            key,
-            io.BytesIO(data),
-            length=len(data),
-            content_type="application/json",
-        )
+        for obj in mc.list_objects(BUCKET_AUDITLOG, recursive=True):
+            if obj.object_name.endswith(f"/{batch_id}.json"):
+                response = mc.get_object(BUCKET_AUDITLOG, obj.object_name)
+                return json.loads(response.read().decode())
     except S3Error as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"status": "registered", "key": key, "bucket": BUCKET_MODELS}
+    raise HTTPException(status_code=404, detail=f"Batch '{batch_id}' not found.")
 
 
-@app.post("/models/{model_id}/upload")
-async def upload_model_artifact(model_id: str, file: UploadFile = File(...),
-                                _user: dict = Depends(_CUSTOMER)):
-    """Upload a binary model artifact (e.g., .pkl, .onnx) to MinIO."""
+# ---------------------------------------------------------------------------
+# Audit + report endpoints
+# ---------------------------------------------------------------------------
+@app.get("/audit/{partner_id}", tags=["audit"])
+async def list_audit_logs(
+    partner_id: str,
+    date: Optional[str] = None,
+    _user: dict = Depends(_ANY_AUTHED),
+):
+    """List batch audit log entries for a partner (optional date filter YYYY-MM-DD)."""
     mc = get_minio()
-    content = await file.read()
-    key = f"{model_id}/artifacts/{file.filename}"
-    try:
-        mc.put_object(
-            BUCKET_MODELS,
-            key,
-            io.BytesIO(content),
-            length=len(content),
-            content_type=file.content_type or "application/octet-stream",
-        )
-    except S3Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return {"status": "uploaded", "key": key, "size_bytes": len(content)}
-
-
-@app.get("/models/{model_id}")
-async def get_model_info(model_id: str):
-    """Retrieve registered model metadata from MinIO."""
-    mc = get_minio()
-    key = f"{model_id}/metadata.json"
-    try:
-        response = mc.get_object(BUCKET_MODELS, key)
-        data = json.loads(response.read().decode())
-        return data
-    except S3Error:
-        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
-
-
-@app.get("/models")
-async def list_models(_user: dict = Depends(_ANY_AUTHED)):
-    """List all registered models from MinIO."""
-    mc = get_minio()
-    models = []
-    try:
-        objects = mc.list_objects(BUCKET_MODELS, recursive=False)
-        for obj in objects:
-            model_id = obj.object_name.rstrip("/")
-            models.append({"model_id": model_id})
-    except S3Error as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    return {"models": models}
-
-
-@app.get("/audit/{model_id}")
-async def list_audit_logs(model_id: str, date: Optional[str] = None,
-                          _user: dict = Depends(_CUSTOMER)):
-    """List audit log entries for a model (optionally filtered by date YYYY-MM-DD)."""
-    mc = get_minio()
-    prefix = f"{model_id}/{date}/" if date else f"{model_id}/"
+    prefix = f"{partner_id}/{date}/" if date else f"{partner_id}/"
     logs = []
     try:
-        objects = mc.list_objects(BUCKET_AUDITLOG, prefix=prefix, recursive=True)
-        for obj in objects:
+        for obj in mc.list_objects(BUCKET_AUDITLOG, prefix=prefix, recursive=True):
             logs.append({
-                "key": obj.object_name,
-                "size": obj.size,
+                "key":           obj.object_name,
+                "size":          obj.size,
                 "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
             })
     except S3Error as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"model_id": model_id, "audit_logs": logs}
+    return {"partner_id": partner_id, "audit_logs": logs}
 
 
-@app.get("/reports/{model_id}")
-async def list_attack_reports(model_id: str, _user: dict = Depends(_CUSTOMER)):
-    """List stored attack reports (HIGH/CRITICAL events) for a model."""
+@app.get("/reports/{partner_id}", tags=["reports"])
+async def list_theft_reports(partner_id: str, _user: dict = Depends(_ANY_AUTHED)):
+    """List stored theft reports (HIGH/CRITICAL batches) for a partner."""
     mc = get_minio()
-    prefix = f"{model_id}/"
+    prefix = f"{partner_id}/"
     reports = []
     try:
-        objects = mc.list_objects(BUCKET_REPORTS, prefix=prefix, recursive=True)
-        for obj in objects:
+        for obj in mc.list_objects(BUCKET_REPORTS, prefix=prefix, recursive=True):
             reports.append({
-                "key": obj.object_name,
-                "size": obj.size,
+                "key":           obj.object_name,
+                "size":          obj.size,
                 "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
             })
     except S3Error as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"model_id": model_id, "attack_reports": reports}
+    return {"partner_id": partner_id, "theft_reports": reports}
 
 
-@app.get("/reports/{model_id}/{report_key:path}")
-async def get_attack_report(model_id: str, report_key: str, _user: dict = Depends(_CUSTOMER)):
-    """Fetch the full content of a specific attack report from MinIO."""
+@app.get("/reports/{partner_id}/{report_key:path}", tags=["reports"])
+async def get_theft_report(partner_id: str, report_key: str, _user: dict = Depends(_ANY_AUTHED)):
+    """Fetch the full content of a specific theft report from MinIO."""
     mc = get_minio()
-    key = f"{model_id}/{report_key}"
+    key = f"{partner_id}/{report_key}"
     try:
         response = mc.get_object(BUCKET_REPORTS, key)
         return json.loads(response.read().decode())
     except S3Error:
         raise HTTPException(status_code=404, detail="Report not found.")
-
-
-# ---------------------------------------------------------------------------
-# Mock model — sentiment classifier
-# POST /predict  →  run inference + anomaly detection in one call
-# ---------------------------------------------------------------------------
-_POSITIVE_WORDS = {"love", "great", "excellent", "amazing", "good", "best",
-                   "fantastic", "wonderful", "happy", "perfect", "awesome"}
-_NEGATIVE_WORDS = {"hate", "terrible", "awful", "bad", "worst", "horrible",
-                   "poor", "disappointing", "broken", "useless", "annoying"}
-
-
-def _mock_sentiment(text: str) -> dict:
-    """Rule-based mock sentiment classifier. Returns label + confidence scores."""
-    words = set(text.lower().split())
-    pos_hits = len(words & _POSITIVE_WORDS)
-    neg_hits = len(words & _NEGATIVE_WORDS)
-
-    rng = np.random.default_rng(abs(hash(text)) % (2 ** 31))
-    base = rng.uniform(0.05, 0.15)
-
-    if pos_hits > neg_hits:
-        conf_pos = rng.uniform(0.65, 0.95)
-        conf_neg = rng.uniform(0.02, 0.15)
-    elif neg_hits > pos_hits:
-        conf_neg = rng.uniform(0.65, 0.95)
-        conf_pos = rng.uniform(0.02, 0.15)
-    else:
-        conf_pos = rng.uniform(0.25, 0.45)
-        conf_neg = rng.uniform(0.25, 0.45)
-
-    conf_neu = max(0.0, 1.0 - conf_pos - conf_neg)
-    scores = {
-        "POSITIVE": round(float(conf_pos), 4),
-        "NEGATIVE": round(float(conf_neg), 4),
-        "NEUTRAL":  round(float(conf_neu), 4),
-    }
-    label = max(scores, key=scores.__getitem__)
-    return {"label": label, "confidence": scores[label], "scores": scores}
-
-
-class PredictRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-    model_id: str = Field(..., description="Target model identifier")
-    query_text: str = Field(..., description="Text to classify")
-    client_id: Optional[str] = Field(None, description="Caller identifier")
-    metadata: Optional[dict] = Field(None, description="Extra metadata")
-
-
-@app.post("/predict")
-async def predict(req: PredictRequest, background_tasks: BackgroundTasks,
-                  _user: dict = Depends(_ANY_AUTHED)):
-    """
-    Run inference against the mock sentiment model AND apply ModelGuard anomaly
-    detection.  Returns the model prediction together with a risk assessment and
-    the MinIO audit-log key so every call is fully traceable.
-    """
-    query_id = str(uuid.uuid4())
-    ts = datetime.now(timezone.utc).isoformat()
-
-    # --- mock inference ---
-    prediction = _mock_sentiment(req.query_text)
-
-    # --- anomaly detection (same pipeline as /analyze) ---
-    features = extract_features(req.query_text, req.client_id)
-    feat_vec = np.array([[
-        features["query_length"],
-        features["unique_token_ratio"],
-        features["entropy"],
-        features["request_rate_1m"],
-    ]])
-    detector = get_detector()
-    pred_label = detector.predict(feat_vec)[0]
-    score_raw = float(detector.decision_function(feat_vec)[0])
-    is_anomaly = bool(pred_label == -1)
-    risk = compute_risk_score(score_raw)
-    level = risk_level(risk)
-
-    audit_record = {
-        "query_id": query_id,
-        "model_id": req.model_id,
-        "client_id": req.client_id,
-        "query_text": req.query_text[:500],
-        "features": features,
-        "risk_score": risk,
-        "risk_level": level,
-        "anomaly": is_anomaly,
-        "timestamp": ts,
-        "metadata": req.metadata or {},
-        "endpoint": "predict",
-        "prediction": prediction,
-    }
-
-    try:
-        log_key = store_audit_log(audit_record)
-    except Exception as exc:
-        logger.error("Failed to store audit log: %s", exc)
-        log_key = "minio-unavailable"
-
-    if is_anomaly and level in ("HIGH", "CRITICAL"):
-        background_tasks.add_task(store_attack_report, audit_record)
-
-    return {
-        "query_id": query_id,
-        "model_id": req.model_id,
-        "prediction": prediction,
-        "risk_score": risk,
-        "risk_level": level,
-        "anomaly": is_anomaly,
-        "features": features,
-        "timestamp": ts,
-        "audit_log_key": log_key,
-    }

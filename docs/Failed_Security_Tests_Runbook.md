@@ -1,8 +1,8 @@
 # Failed Security Tests Runbook — ModelGuard AI
 
 - Status: MVP — Redesign v2
-- Version: 0.2.0-oss
-- Last Updated: 2026-04-26
+- Version: 0.3.0-oss
+- Last Updated: 2026-05-03
 - Related: `Threat_Model.md`, `High_Traffic_Runbook.md`, `Oncall_Runbook.md`
 
 ---
@@ -30,7 +30,7 @@ source ../.env
 
 ---
 
-## T-03 — Login Brute-Force Protection
+## ST-03 — Login Brute-Force Protection
 
 **Test:** `20 consecutive failed logins trigger throttling or lockout`  
 **File:** `tests/security.test.ts`  
@@ -59,7 +59,7 @@ If slowapi is missing or the import failed, the limiter is not active — skip t
 ```bash
 # Tail live logs while re-running the test
 docker compose logs -f backend &
-cd tests && npx jest security.test.ts --verbose
+cd tests && bun test security.test.ts --verbose
 ```
 
 Look for repeated `POST /auth/login 401` lines with no `429` in between. If all return `401`, the limiter is not firing.
@@ -83,13 +83,11 @@ docker compose ps
 docker inspect modelguard-backend | grep -i "created\|image"
 ```
 
-If the image predates the slowapi commit (`907f479`), the container is running stale code.
+If the image predates the slowapi commit, the container is running stale code.
 
 ---
 
 ### Phase 2 — Mitigate
-
-Choose the appropriate response based on what the investigation found.
 
 **2.1 Stale image — rebuild and restart**
 
