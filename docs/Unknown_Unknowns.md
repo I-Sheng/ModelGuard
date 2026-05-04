@@ -3,8 +3,8 @@
 ---
 
 - Status: Living document — expand as unknowns are discovered
-- Version: 0.1.0
-- Last Updated: 2026-04-26
+- Version: 0.2.0
+- Last Updated: 2026-05-03
 
 ---
 
@@ -26,16 +26,19 @@ This document captures risk areas that are not yet understood well enough to be 
 
 ---
 
-## U-02 — Isolation Forest Model Poisoning via Training Data Drift
+## U-02 — Isolation Forest Detector Poisoning via Training Distribution Drift
 
-**Surface**: `api/main.py` — `_TRAIN_DATA` synthetic samples, trained at startup
+**Surface**: `api/main.py` — `_TRAIN_DATA` synthetic samples, trained at startup; detector persisted to `modelguard-detectors` in MinIO
 
-**Why it is opaque**: The detector is trained once on 500 fixed synthetic rows at process startup. There is no monitoring of feature distribution drift over real traffic. If the real-world query distribution shifts significantly (e.g., a new legitimate model type with long queries and high entropy), the detector's anomaly boundary moves without any alert. An attacker who understands the training distribution could craft queries that land just inside the boundary indefinitely.
+**Why it is opaque**: The detector is trained once on fixed synthetic rows representing normal user behavior. There is no monitoring of real-world feature distribution drift across submitted batches. If legitimate user behavior shifts (e.g., a new class of AI application produces high `query_count` users that are benign), the detector's anomaly boundary moves without any alert. An attacker who understands the training distribution could also craft queries that land just inside the boundary across many batch windows, avoiding detection indefinitely.
+
+Additionally, the persisted detector file in MinIO (`modelguard-detectors/v1/detector.pkl`) could be replaced by an attacker with MinIO credentials, causing the backend to load a compromised model that suppresses all alerts or flags arbitrary users.
 
 **What would resolve it**:
-- Log feature vectors for every request and periodically compare to training distribution (KL divergence or a simple histogram)
-- Set a threshold at which the model is retrained or an alert is raised
-- Red-team the detector with adversarial inputs designed to stay below the anomaly threshold
+- Log per-user feature vectors for every batch and periodically compare to the training distribution (KL divergence or histogram comparison)
+- Set a threshold at which a retraining alert is raised
+- Hash-verify the detector file loaded from MinIO against a known-good checksum stored out-of-band
+- Red-team the detector with adversarial batches designed to stay below the anomaly threshold
 
 ---
 
@@ -43,7 +46,7 @@ This document captures risk areas that are not yet understood well enough to be 
 
 **Surface**: `api/main.py` — `SECRET_KEY` env var, HS256 signing
 
-**Why it is opaque**: The application reads `SECRET_KEY` from the environment at startup but there is no enforcement of minimum entropy, no rotation mechanism, and no revocation list. If the key leaks (e.g., via a secrets manager misconfiguration or a logged environment dump), all tokens signed with it are valid indefinitely until the service is restarted with a new key. The blast radius and detection time for such a leak are unknown.
+**Why it is opaque**: The application reads `SECRET_KEY` from the environment at startup but there is no enforcement of minimum entropy, no rotation mechanism, and no revocation list. If the key leaks, all tokens signed with it are valid indefinitely until the service is restarted with a new key. The blast radius and detection time for such a leak are unknown.
 
 **What would resolve it**:
 - Enforce a minimum key length (>= 256 bits) at startup with a hard failure
@@ -78,30 +81,29 @@ This document captures risk areas that are not yet understood well enough to be 
 
 ---
 
-## U-06 — File Upload Content Validation
+## U-06 — Batch Payload Size and Content Validation
 
-**Surface**: `POST /models/{model_id}/upload` — `UploadFile` stored to MinIO
+**Surface**: `POST /batch/analyze` — `queries` list in the JSON body
 
-**Why it is opaque**: The upload endpoint stores whatever bytes the client sends under a caller-controlled filename, with no MIME type check, no file size limit, no antivirus scan, and no validation that the file is a legitimate model artifact. A malicious pickle or ONNX file uploaded here could be deserialized by a downstream consumer and execute arbitrary code. The set of downstream consumers and their deserialization behavior is currently unknown.
+**Why it is opaque**: The endpoint accepts an arbitrarily long list of query records with no enforced upper bound on the number of records, the length of individual `input` or `output` strings, or the character set. A single oversized batch (e.g., 1 million records with 10KB inputs) could exhaust backend memory or CPU during feature computation. Additionally, there is no validation that `query_id` values are unique within a batch, which could skew per-user aggregation silently.
 
 **What would resolve it**:
-- Define an allowlist of permitted file extensions and MIME types
-- Enforce a maximum upload size
-- Document all known consumers of model artifacts and whether they deserialize with `pickle`, `torch.load`, or a safer format
-- Consider a sandbox deserialization check on ingest
+- Enforce a maximum `len(queries)` per batch request (e.g., 100,000)
+- Enforce a maximum string length on `input` and `output` fields
+- Validate that `query_id` values are unique within the batch
+- Add a payload size check to the security test suite
 
 ---
 
-## U-07 — process-global `_query_window` Under Concurrent Load
+## U-07 — Partner Identity Verification
 
-**Surface**: `api/main.py` — `_query_window: list[float]` used for per-request rate feature
+**Surface**: `POST /batch/analyze` — `partner_id` field in the request body
 
-**Why it is opaque**: `_query_window` is a module-level list mutated by every request handler. Under `uvicorn` with multiple workers (`--workers N`), each worker process has its own copy, so the rate estimate is per-worker, not per-service. Under a single worker with async concurrency, list append and list comprehension filtering are not atomic. The actual statistical behavior of the rate feature under real concurrency — and whether it can be gamed — has not been analyzed.
+**Why it is opaque**: The `partner_id` field in the batch payload is caller-supplied and is not verified against the authenticated JWT's identity. A partner authenticated as `partner-A` could submit a batch claiming `partner_id = partner-B`, causing the audit log and report to be filed under a different partner's namespace. This could be used to pollute another partner's audit history or to avoid attribution of a suspicious batch.
 
 **What would resolve it**:
-- Profile `_query_window` under concurrent load (e.g., with `locust`) and confirm the rate feature behaves as expected
-- If multiple workers are ever used, move rate state to a shared store (Redis, or a single sidecar process)
-- Add a note in the architecture doc about the single-worker assumption
+- Derive `partner_id` from the authenticated JWT's `username` (or a `partner_id` claim), not from the request body
+- Add a test that confirms a partner cannot submit batches under a different `partner_id`
 
 ---
 
@@ -109,7 +111,7 @@ This document captures risk areas that are not yet understood well enough to be 
 
 **Surface**: `oe-dashboard/app.py` — admin JWT obtained at startup, shared across all dashboard sessions
 
-**Why it is opaque**: The dashboard obtains a single admin JWT at process startup and uses it for all backend calls regardless of which browser session is active. If the Streamlit port (8501) is accessible to anyone on the network (or the internet), every visitor effectively has admin-level read access to audit logs and attack reports without authenticating. The exposure window and network topology are not documented.
+**Why it is opaque**: The dashboard obtains a single admin JWT at process startup and uses it for all backend calls regardless of which browser session is active. If the Streamlit port (8501) is accessible to anyone on the network (or the internet), every visitor effectively has admin-level read access to all partner audit logs and theft reports without authenticating. The exposure window and network topology are not documented.
 
 **What would resolve it**:
 - Confirm that port 8501 is not publicly reachable without additional network controls (firewall, VPN, reverse proxy with auth)

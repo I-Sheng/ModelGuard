@@ -19,7 +19,7 @@ MinIO     ✅ / ❌
 Detector  ✅ / ❌
 ```
 
-- **All green** → system is healthy. Proceed to check for security events (step 4).
+- **All green** → system is healthy. Proceed to check for theft events (step 4).
 - **Any red** → follow the triage tree below.
 
 ---
@@ -60,7 +60,7 @@ Users cannot reach the SwaggerAI UI. ModelGuard detection still works via direct
    docker compose ps frontend
    docker compose logs --tail=30 frontend
    ```
-2. Reload OE Dashboard — if API is healthy, detection is unaffected. Frontend is stateless; restart is safe:
+2. Reload OE Dashboard — if API is healthy, batch analysis is unaffected. Frontend is stateless; restart is safe:
    ```bash
    docker compose restart frontend
    ```
@@ -70,7 +70,7 @@ Users cannot reach the SwaggerAI UI. ModelGuard detection still works via direct
 
 ### ❌ MinIO is down
 
-Audit logs and attack reports cannot be written. Detection scoring still runs, but all audit records will have `audit_log_key = "minio-unavailable"`.
+Audit logs and theft reports cannot be written. Detection scoring still runs, but all audit records will have `audit_log_key = "minio-unavailable"`.
 
 1. Check MinIO:
    ```bash
@@ -84,74 +84,79 @@ Audit logs and attack reports cannot be written. Detection scoring still runs, b
    ```
    MinIO data is persisted in the `minio_data` Docker volume — a restart does **not** lose data.
 4. After MinIO recovers, confirm via OE Dashboard → **System Health** → MinIO = `OK`.
-5. **Check for missing audit logs**: OE Dashboard → Audit Logs → fetch for the affected time window. Any queries that ran during the outage will have no audit record. Note the outage window for the incident report.
+5. **Check for missing audit logs**: OE Dashboard → Audit Logs → fetch for the affected time window. Any batches analyzed during the outage will have no audit record. Note the outage window for the incident report.
 
 ---
 
 ### ❌ Detector is not loaded
 
-The Isolation Forest is not in memory. Scoring is unavailable; `/analyze` and `/predict` will fail or return incorrect results.
+The Isolation Forest is not in memory. Scoring is unavailable; `/batch/analyze` will fail or return incorrect results.
 
-1. Check backend startup logs for the training confirmation line:
+1. Check backend startup logs for the training/load confirmation line:
    ```bash
-   docker compose logs backend | grep "Isolation Forest trained"
+   docker compose logs backend | grep -E "Isolation Forest trained|detector loaded"
    ```
-2. If missing, the backend may have crashed before `get_detector()` was called:
+2. If the detector was not loaded from MinIO, check whether the model file exists:
+   ```bash
+   docker compose exec backend python -c "
+   from minio import Minio; import os
+   c = Minio(os.environ['MINIO_ENDPOINT'], ...)
+   print(list(c.list_objects('modelguard-detectors')))
+   "
+   ```
+3. If missing, the backend will retrain from synthetic data on the next restart:
    ```bash
    docker compose restart backend
    ```
-3. Confirm: OE Dashboard → **System Health** → Detection Engine = `LOADED`.
+4. Confirm: OE Dashboard → **System Health** → Detection Engine = `LOADED`.
 
 ---
 
-## Scenario 4 — Security Event Spike
+## Scenario 4 — Theft Event Spike
 
-All four subsystems are green, but you received an alert about unusual query activity.
+All four subsystems are green, but you received an alert about unusual batch analysis results.
 
-### Step 1 — Check Attack Reports
+### Step 1 — Check Theft Reports
 
-OE Dashboard → **Attack Reports** → enter a model ID (e.g. `sentiment-v1`) → Fetch.
+OE Dashboard → **Theft Reports** → enter a partner ID (e.g. `openai-demo`) → Fetch.
 
-- **No reports**: No HIGH/CRITICAL events for that model. Check other model IDs or widen the Audit Logs search.
-- **Reports present**: Note the `last_modified` timestamps. Are they clustered (burst attack) or spread over time (slow extraction)?
+- **No reports**: No HIGH/CRITICAL batches for that partner. Check other partner IDs or widen the Audit Logs search.
+- **Reports present**: Note the `window_start` / `window_end` timestamps. Are they clustered (burst campaign) or spread over time (slow extraction)?
 
 ### Step 2 — Inspect the Feature Vector
 
-Select a report from the dropdown → expand **Feature Vector**:
+Select a report from the dropdown → expand **User Results** → inspect the per-user feature vectors of flagged users:
 
-| Feature | Extraction attack signal |
+| Feature | Theft signal |
 |---|---|
-| `query_length` > 400 | Long, verbose queries typical of model-stealing prompts |
-| `unique_token_ratio` < 0.3 | Highly repetitive — systematic grid search |
-| `entropy` < 2.5 | Low-entropy payload — templated probing |
-| `request_rate_1m` > 20 | Automated burst — not human-speed |
+| `query_count` > 200 per hour | High-volume automated querying |
+| `unique_input_ratio` > 0.95 | Systematic diversity sweep — exploring the full input space |
+| `avg_input_length` > 300 chars | Long, structured prompts typical of model-stealing |
+| `input_entropy` > 4.5 | High-entropy inputs — varied prompt engineering |
+| `output_diversity` > 0.90 | Mapping as many distinct outputs as possible |
 
-A CRITICAL event with all four signals simultaneously is a strong indicator of an active model extraction attempt.
+A CRITICAL batch with multiple flagged users showing all five signals simultaneously is a strong indicator of an active model extraction campaign.
 
-### Step 3 — Identify the Client
+### Step 3 — Identify the Users
 
-In the **Full Report** section, check `client_id` and `metadata` (IP address, user-agent). Cross-reference with:
+In the **Full Report** section, note the `query_user` values of all flagged users. Share these with the partner so they can cross-reference with their account records.
 
-```bash
-docker compose logs backend | grep "<client_id>"
-```
+### Step 4 — Scope the Campaign
 
-### Step 4 — Scope the Attack
+OE Dashboard → **Audit Logs** → same partner ID + date range → Fetch.
 
-OE Dashboard → **Audit Logs** → same model ID + today's date → Fetch.
-
-- Sort by `last_modified` (newest first).
-- Count consecutive HIGH/CRITICAL rows. A sustained run of 10+ HIGH events in < 5 minutes warrants escalation.
+- Sort by `window_start` (newest first).
+- Count consecutive HIGH/CRITICAL batches. A sustained run of HIGH events across multiple hourly windows warrants escalation.
 
 ### Step 5 — Escalation Checklist
 
 ```
-[ ] Confirm model ID and client_id of the attacker
-[ ] Screenshot or export the Attack Reports table
-[ ] Note the time range and total event count
-[ ] Check if the same client_id appears across multiple model IDs
-[ ] Rotate or revoke the JWT token for the affected user (if client_id maps to a known account)
-[ ] File an incident report with: model_id, client_id, time range, risk score range, feature values
+[ ] Confirm partner_id and flagged query_user values
+[ ] Screenshot or export the Theft Reports table
+[ ] Note the time range, batch count, and flagged user count
+[ ] Check if the same query_user appears across multiple batch windows
+[ ] Notify the partner to consider throttling or blocking the flagged users
+[ ] File an incident report with: partner_id, query_users, time range, risk score range, feature values
 ```
 
 ---
@@ -175,12 +180,9 @@ The Streamlit container may have crashed or lost its admin JWT.
    ```
 4. As a fallback, query the backend directly:
    ```bash
-   # Get a token
-   curl -s -X POST http://localhost:8000/auth/login \
-     -d "username=admin&password=admin_password" | jq .access_token
-
-   # Check health
-   curl -s -H "Authorization: Bearer <token>" \
+   TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+     -d "username=admin&password=admin_password" | jq -r .access_token)
+   curl -s -H "Authorization: Bearer $TOKEN" \
      http://localhost:8000/health/detail | jq .
    ```
 
@@ -224,5 +226,5 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 |---|---|---|
 | **P1 — Critical** | Backend down OR MinIO down with active traffic | Immediate restart; notify team; audit log gap check |
 | **P2 — High** | Detector not loaded; frontend down | Restart affected service within 15 minutes |
-| **P3 — Medium** | Sustained HIGH/CRITICAL events (> 10 in 5 min) from one client | Investigate client identity; consider token revocation |
-| **P4 — Low** | Isolated CRITICAL event; OE Dashboard flaky | Monitor for recurrence; no immediate action required |
+| **P3 — Medium** | Sustained HIGH/CRITICAL batches (> 3 consecutive windows) from one partner | Investigate flagged users; notify partner |
+| **P4 — Low** | Isolated CRITICAL batch; OE Dashboard flaky | Monitor for recurrence; no immediate action required |

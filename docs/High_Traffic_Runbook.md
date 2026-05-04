@@ -8,9 +8,7 @@
 
 ## Background
 
-ModelGuard has no rate-limiting middleware on any endpoint (T-03). High-volume traffic against `/predict` exhausts MinIO write capacity and fills `modelguard-auditlog` until disk is exhausted — at which point the API silently continues without storing logs, creating a detection blind spot. High volume against `/auth/login` enables unlimited credential stuffing attempts. Arbitrarily large `query_text` payloads compound both impacts.
-
-Relevant code: `api/main.py` — `_query_window` (line ~147) is process-global, not per-client, so it cannot distinguish one high-volume source from many.
+ModelGuard has no rate-limiting middleware on any endpoint (T-03). High-volume traffic against `/batch/analyze` exhausts MinIO write capacity and fills `modelguard-auditlog` until disk is exhausted — at which point the API silently continues without storing records, creating a detection blind spot. High volume against `/auth/login` enables unlimited credential stuffing attempts. Oversized batch payloads (no enforced `max_records` limit) compound both impacts.
 
 > **Important:** Elevated traffic is not self-evidently malicious. It may be a legitimate usage spike, a misbehaving client, a bot, or a deliberate flood. The identification phase must establish which before you take any blocking action.
 
@@ -37,7 +35,7 @@ docker compose logs -f backend
 
 - Backend container is running (`Up`) but response times are degraded or 503s appear
 - `docker stats` shows backend CPU pegged near 100% or memory climbing steadily
-- Log lines repeat rapidly with the same or rotating `client_id` values
+- Log lines repeat rapidly with the same or rotating `partner_id` values
 - Log lines contain `minio write failed` or `audit_log_key: minio-unavailable` — MinIO is saturated
 
 If the backend is crashed or MinIO is down for a non-traffic reason, follow `Oncall_Runbook.md` first.
@@ -50,21 +48,21 @@ If the backend is crashed or MinIO is down for a non-traffic reason, follow `Onc
 # Count requests per second in the last 200 log lines
 docker compose logs --tail=200 backend | grep -oP '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' | sort | uniq -c | sort -rn | head -20
 
-# Unique client_id values in recent logs (high cardinality = many sources)
-docker compose logs --tail=500 backend | grep -oP '"client_id":\s*"\K[^"]+' | sort | uniq -c | sort -rn | head -20
+# Unique partner_id values in recent logs (high cardinality = many sources)
+docker compose logs --tail=500 backend | grep -oP '"partner_id":\s*"\K[^"]+' | sort | uniq -c | sort -rn | head -20
 
 # Endpoint breakdown — which route is being hit?
 docker compose logs --tail=500 backend | grep -oP '"(POST|GET) /\S+' | sort | uniq -c | sort -rn
 
-# Payload size signal — look for anomalously large query_length values
-docker compose logs --tail=200 backend | grep "query_length" | grep -oP '"query_length":\s*\K[\d.]+'| sort -n | tail -20
+# Payload size signal — look for anomalously large total_queries values
+docker compose logs --tail=200 backend | grep "total_queries" | grep -oP '"total_queries":\s*\K[\d.]+'| sort -n | tail -20
 ```
 
 **Use OE Dashboard as a second source:**
 
 - Open `http://localhost:8501` → **Audit Logs** → fetch the last 30 minutes
-- Sort by `request_rate_1m` descending — values > 20 from a single `client_id` indicate a burst
-- Filter by `risk_score = HIGH or CRITICAL` — a traffic flood produces a dense cluster here
+- Sort by `flagged_users` descending — values > 5 from a single `partner_id` indicate a burst
+- Filter by `batch_risk_level = HIGH or CRITICAL` — a traffic flood produces a dense cluster here
 
 ---
 
@@ -74,8 +72,8 @@ Answer these questions before choosing a response. The goal is to determine inte
 
 | Question | Where to look | What you are deciding |
 |---|---|---|
-| Is traffic from one IP / one `client_id`? | Backend logs, Audit Logs table | Concentrated vs. distributed |
-| Is the `client_id` a known registered user? | `api/main.py` `USERS` dict or your user store | Legitimate user vs. unknown/bot |
+| Is traffic from one IP / one `partner_id`? | Backend logs, Audit Logs table | Concentrated vs. distributed |
+| Is the `partner_id` a known registered partner? | `api/main.py` `USERS` dict or your user store | Legitimate partner vs. unknown/bot |
 | Are requests authenticated (carry a JWT)? | Log lines show `401` vs `200` | Whether the source has a valid account |
 | Are payloads large (`query_length` > 1000)? | OE Dashboard feature vectors | Compute amplification — payload size matters |
 | Are source IPs diverse? | Reverse-proxy / load balancer access logs | Single misbehaving client vs. many sources |
@@ -84,8 +82,8 @@ Answer these questions before choosing a response. The goal is to determine inte
 **Three likely outcomes after this step:**
 
 1. **Known user, likely accident** — legitimate client misconfiguration or runaway script. Contact the user before blocking.
-2. **Unknown or suspicious source** — no matching user, automated patterns, unusual hours. Proceed with rate limiting; escalate if it continues.
-3. **Confirmed malicious** — credential stuffing patterns on `/auth/login`, extraction signatures in feature vectors (see `Oncall_Runbook.md` Scenario 4). Block and file incident report.
+2. **Unknown or suspicious source** — no matching partner, automated patterns, unusual hours. Proceed with rate limiting; escalate if it continues.
+3. **Confirmed malicious** — credential stuffing patterns on `/auth/login`, or a flood of `/batch/analyze` requests (see `Oncall_Runbook.md` Scenario 4). Block and file incident report.
 
 ---
 
@@ -95,7 +93,7 @@ Answer these questions before choosing a response. The goal is to determine inte
 
 **Step 1 — Determine intent before blocking.**
 
-If the `client_id` maps to a known user, contact them first. A runaway integration test or misconfigured retry loop is the most common cause, and blocking a legitimate customer requires justification.
+If the `partner_id` maps to a known user, contact them first. A runaway integration test or misconfigured retry loop is the most common cause, and blocking a legitimate customer requires justification.
 
 If the source is unrecognized or contact is not possible, proceed to Step 2.
 
@@ -158,7 +156,7 @@ Spin additional backend replicas behind a load balancer:
 docker compose up -d --scale backend=3
 ```
 
-> Note: `_query_window` in `main.py` (line ~147) is process-global. With multiple replicas each process tracks its own window, so per-client rate detection becomes inaccurate. This is a known limitation under T-03 until a shared rate store (e.g., Redis) is added.
+> Note: With multiple replicas each process tracks its own request counter, so per-partner rate detection becomes inaccurate. This is a known limitation under T-03 until a shared rate store (e.g., Redis) is added.
 
 **Step 3 — Scale up (vertical).**
 
@@ -180,21 +178,21 @@ While under high load, reduce MinIO write pressure by temporarily disabling back
 
 ### 2.3 Server overwhelmed with compute (not purely request volume)
 
-This occurs when large `query_text` payloads drive high CPU on the Isolation Forest scorer, regardless of how many unique sources are sending them.
+This occurs when oversized batch payloads (many query records or very long `input`/`output` strings) drive high CPU on the Isolation Forest scorer, regardless of how many unique sources are sending them.
 
 **Step 1 — Identify the payload size.**
 
 ```bash
-docker compose logs --tail=200 backend | grep "query_length" \
-  | grep -oP '"query_length":\s*\K[\d.]+' | awk '{sum+=$1; n++} END {print "avg:", sum/n}' 
+docker compose logs --tail=200 backend | grep "total_queries" \
+  | grep -oP '"total_queries":\s*\K[\d.]+' | awk '{sum+=$1; n++} END {print "avg:", sum/n}' 
 ```
 
 **Step 2 — Enforce a payload size limit.**
 
-In `api/main.py`, add a `max_length` validator to `QueryRequest` and `PredictRequest`:
+In `api/main.py`, add a `max_items` validator to `BatchAnalyzeRequest`:
 
 ```python
-query_text: str = Field(..., max_length=2000)
+queries: list[QueryRecord] = Field(..., max_items=10000)
 ```
 
 Restart the backend to apply:
@@ -210,6 +208,7 @@ docker compose restart backend
 ## Phase 3 — Recovery and Verification
 
 ### 3.1 Confirm service is restored
+
 
 ```bash
 # Basic health (no auth)
@@ -228,9 +227,9 @@ OE Dashboard: open `http://localhost:8501` → **System Health** → all four in
 
 ### 3.2 Audit log gap check
 
-High traffic may have exhausted MinIO before the backend stopped accepting requests — audit records will be missing for that window.
+High traffic may have exhausted MinIO before the backend stopped accepting requests — batch audit records will be missing for that window.
 
-- OE Dashboard → **Audit Logs** → enter the affected model ID and the incident time range → Fetch.
+- OE Dashboard → **Audit Logs** → enter the affected partner ID and the incident time range → Fetch.
 - Any gap (no entries for a span that had traffic) = lost audit records. Note the window in the incident report.
 
 ### 3.3 Security tests
@@ -238,10 +237,10 @@ High traffic may have exhausted MinIO before the backend stopped accepting reque
 Run the full test suite to confirm no regressions were introduced during mitigation changes:
 
 ```bash
-pytest api/
+cd tests && bun test --verbose
 ```
 
-T-03 tests assert the vulnerability currently exists. If you deployed a rate-limit fix, update `api/tests/test_security.py` accordingly and confirm the test now fails in the expected direction before committing.
+T-03 tests assert the vulnerability currently exists. If you deployed a rate-limit fix, update `tests/security.test.ts` accordingly and confirm the test now passes before committing.
 
 ---
 
@@ -254,7 +253,7 @@ The runbook above can be 100% automated. Priority order:
 | Traffic spike detection | Prometheus + Alertmanager rule on `http_requests_total` rate > threshold | Low |
 | Payload size enforcement | `Field(max_length=2000)` in Pydantic models — one-line fix | Trivial |
 | Per-IP rate limiting | slowapi or starlette middleware; or nginx `limit_req_zone` | Low |
-| Per-client JWT rate limiting | Move `_query_window` to Redis (keyed by `client_id`) | Medium |
+| Per-partner rate limiting | Add a Redis-backed request counter keyed by `partner_id` | Medium |
 | Auto-scale on load | Kubernetes HPA targeting CPU utilization | Medium |
 | IP blocklist | Fail2ban watching backend logs; or WAF rule | Low |
 | Audit log WORM protection | Enable MinIO object lock on `modelguard-auditlog` bucket (also fixes T-02) | Low |
@@ -279,7 +278,7 @@ The following information would improve this runbook and should be provided in t
 
 1. **Reverse proxy / load balancer details** — Is nginx, Traefik, or a cloud LB in front of the backend? If yes, IP-level blocking and rate limiting belong there, not in the application.
 2. **Deployment target** — Docker Compose single-host vs. Kubernetes vs. cloud container service. Scaling steps differ substantially.
-3. **Shared rate store** — Is Redis available? Per-client rate limiting requires it (the current `_query_window` is process-local).
+3. **Shared rate store** — Is Redis available? Per-partner rate limiting across multiple backend replicas requires a shared store.
 4. **Observability stack** — Is Prometheus/Grafana deployed? If yes, alerting can be wired directly to this runbook's triggers.
 5. **On-call contact list** — Who owns network-layer escalation (cloud provider, ISP null-routing)?
 6. **JWT revocation strategy** — Until a token denylist or shorter TTL is implemented, rotating `JWT_SECRET` is the only revocation mechanism and it affects all users.

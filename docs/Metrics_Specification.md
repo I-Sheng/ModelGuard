@@ -25,23 +25,14 @@ Used by: Statistics page.
 
 | Field | Type | Dashboard use |
 |---|---|---|
-| `total_models` | integer | "Registered Models" metric |
+| `total_partners` | integer | "Registered Partners" metric |
+| `total_batches_analyzed` | integer | "Batches Analyzed" metric |
 | `detector` | string | "Detection Engine" metric |
 | `minio` | string | "MinIO" metric |
 
 ---
 
-## `GET /models`
-
-Used by: Statistics page "Registered Models" table.
-
-| Field | Type | Dashboard use |
-|---|---|---|
-| `models` | array of objects | Rendered as a dataframe |
-
----
-
-## `GET /audit/{model_id}`
+## `GET /audit/{partner_id}`
 
 Used by: Audit Logs page.
 
@@ -51,27 +42,45 @@ Query params: `date` (optional, `YYYY-MM-DD`).
 |---|---|---|
 | `audit_logs` | array of objects | Rendered as a dataframe; count shown in success message |
 
+Each audit log object includes:
+
+| Field | Type | Description |
+|---|---|---|
+| `batch_id` | string | Unique identifier for the analyzed batch |
+| `partner_id` | string | Partner who submitted the batch |
+| `window_start` | string (ISO 8601) | Start of the query window |
+| `window_end` | string (ISO 8601) | End of the query window |
+| `total_queries` | integer | Total query records in the batch |
+| `total_users` | integer | Distinct users in the batch |
+| `flagged_users` | integer | Users scored HIGH or CRITICAL |
+| `batch_risk_level` | string | `LOW` / `MEDIUM` / `HIGH` / `CRITICAL` |
+| `timestamp` | string (ISO 8601) | Time the analysis was completed |
+
 ---
 
-## `GET /reports/{model_id}`
+## `GET /reports/{partner_id}`
 
-Used by: Attack Reports page (report list).
+Used by: Theft Reports page (report list).
 
 | Field | Type | Dashboard use |
 |---|---|---|
-| `attack_reports` | array of objects | Rendered as a dataframe; count shown in warning |
-| `attack_reports[].key` | string | Populates the "Inspect report" selectbox |
+| `theft_reports` | array of objects | Rendered as a dataframe; count shown in warning |
+| `theft_reports[].key` | string | Populates the "Inspect report" selectbox |
 
 ---
 
-## `GET /reports/{model_id}/{report_key}`
+## `GET /reports/{partner_id}/{report_key}`
 
-Used by: Attack Reports page (report detail).
+Used by: Theft Reports page (report detail).
 
 | Field | Type | Dashboard use |
 |---|---|---|
-| `risk_level` | string | `LOW` / `MEDIUM` / `HIGH` / `CRITICAL` — colored label |
-| `risk_score` | number | "Risk Score / 100" metric |
-| `anomaly` | boolean | "Anomaly Yes/No" metric |
-| `query_id` | string | "Query ID" metric (first 8 chars) |
-| `features` | object | "Feature Vector" JSON block |
+| `batch_risk_level` | string | `LOW` / `MEDIUM` / `HIGH` / `CRITICAL` — colored label |
+| `flagged_users` | integer | "Flagged Users" metric |
+| `total_queries` | integer | "Total Queries in Batch" metric |
+| `batch_id` | string | "Batch ID" metric (first 8 chars) |
+| `user_results` | array | Per-user risk breakdown table |
+| `user_results[].query_user` | string | User identifier |
+| `user_results[].risk_score` | number | "Risk Score / 100" per user |
+| `user_results[].risk_level` | string | Per-user risk level label |
+| `user_results[].features` | object | "Feature Vector" JSON block |

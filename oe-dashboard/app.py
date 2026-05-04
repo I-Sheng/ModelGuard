@@ -1,7 +1,7 @@
 """
 ModelGuard AI - Operations & Engineering Dashboard
 Internal tool for platform operators: health monitoring, audit log review,
-and attack report investigation.
+and theft report investigation.
 """
 
 import os
@@ -11,9 +11,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-API_BASE  = "http://backend:8000"
-_OE_USER  = os.getenv("OE_ADMIN_USER",     "admin")
-_OE_PASS  = os.getenv("OE_ADMIN_PASSWORD", "admin_password")
+API_BASE = "http://backend:8000"
+_OE_USER = os.getenv("OE_ADMIN_USER",     "admin")
+_OE_PASS = os.getenv("OE_ADMIN_PASSWORD", "admin_password")
 
 st.set_page_config(
     page_title="ModelGuard OE Dashboard",
@@ -58,12 +58,12 @@ def risk_color(level: str) -> str:
 # Sidebar
 # ---------------------------------------------------------------------------
 st.sidebar.title("🛡️ ModelGuard AI")
-st.sidebar.caption("OE Dashboard · v0.2.0-oss")
+st.sidebar.caption("OE Dashboard · v0.3.0-oss")
 st.sidebar.caption("Operations & Engineering Monitoring")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["System Health", "Statistics", "Audit Logs", "Attack Reports"],
+    ["System Health", "Statistics", "Audit Logs", "Theft Reports"],
 )
 
 # ---------------------------------------------------------------------------
@@ -97,10 +97,10 @@ if page == "System Health":
         st.stop()
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Frontend",        health.get("frontend", "—").upper())
-    col2.metric("API Status",      health.get("status",   "—").upper())
-    col3.metric("MinIO",           health.get("minio",    "—").upper())
-    col4.metric("Detection Engine",health.get("detector", "—").upper())
+    col1.metric("Frontend",         health.get("frontend", "—").upper())
+    col2.metric("API Status",       health.get("status",   "—").upper())
+    col3.metric("MinIO",            health.get("minio",    "—").upper())
+    col4.metric("Detection Engine", health.get("detector", "—").upper())
 
     st.divider()
     st.subheader("Raw Health Payload")
@@ -129,77 +129,74 @@ elif page == "Statistics":
 
     stats = api_get("/stats")
     if stats:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Registered Models", stats.get("total_models", "—"))
-        col2.metric("Detection Engine",  stats.get("detector", "—").upper())
-        col3.metric("MinIO",             stats.get("minio",    "—").upper())
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Registered Partners",   stats.get("total_partners",         "—"))
+        col2.metric("Batches Analyzed",      stats.get("total_batches_analyzed", "—"))
+        col3.metric("Detection Engine",      stats.get("detector", "—").upper())
+        col4.metric("MinIO",                 stats.get("minio",    "—").upper())
     else:
         st.warning("Could not fetch stats from backend.")
-
-    st.divider()
-    st.subheader("Registered Models")
-    models_resp = api_get("/models")
-    model_list  = models_resp.get("models", []) if models_resp else []
-    if model_list:
-        st.dataframe(pd.DataFrame(model_list), use_container_width=True)
-    else:
-        st.info("No models registered yet. Use the SwaggerAI frontend to register one.")
 
 
 elif page == "Audit Logs":
     st.title("Audit Logs")
-    st.caption("Query audit records — bucket: `modelguard-auditlog`")
+    st.caption("Batch analysis records — bucket: `modelguard-auditlog`")
 
     col1, col2 = st.columns(2)
-    model_id    = col1.text_input("Model ID", value="sentiment-v1")
+    partner_id  = col1.text_input("Partner ID", value="openai-demo")
     date_filter = col2.text_input("Date filter (YYYY-MM-DD, optional)", value="")
 
     if st.button("Fetch Audit Logs"):
         params = {"date": date_filter} if date_filter else {}
-        result = api_get(f"/audit/{model_id}", params=params)
+        result = api_get(f"/audit/{partner_id}", params=params)
         if result:
             logs = result.get("audit_logs", [])
             if logs:
                 st.success(f"{len(logs)} record(s) found.")
                 st.dataframe(pd.DataFrame(logs), use_container_width=True)
             else:
-                st.info("No audit logs found for this model / date combination.")
+                st.info("No audit logs found for this partner / date combination.")
 
 
-elif page == "Attack Reports":
-    st.title("Attack Reports")
-    st.caption("HIGH / CRITICAL anomaly reports — bucket: `modelguard-reports`")
+elif page == "Theft Reports":
+    st.title("Theft Reports")
+    st.caption("HIGH / CRITICAL batch theft reports — bucket: `modelguard-reports`")
 
-    model_id = st.text_input("Model ID", value="sentiment-v1")
+    partner_id = st.text_input("Partner ID", value="openai-demo")
 
-    if st.button("Fetch Attack Reports"):
-        result = api_get(f"/reports/{model_id}")
+    if st.button("Fetch Theft Reports"):
+        result = api_get(f"/reports/{partner_id}")
         if result:
-            reports = result.get("attack_reports", [])
+            reports = result.get("theft_reports", [])
             if reports:
-                st.warning(f"{len(reports)} attack report(s) found for **{model_id}**.")
+                st.warning(f"{len(reports)} theft report(s) found for **{partner_id}**.")
                 df = pd.DataFrame(reports)
                 st.dataframe(df, use_container_width=True)
 
                 st.divider()
                 selected = st.selectbox("Inspect report:", [r["key"] for r in reports])
                 if selected:
-                    report_key = selected[len(model_id) + 1:]
-                    detail = api_get(f"/reports/{model_id}/{report_key}")
+                    report_key = selected[len(partner_id) + 1:]
+                    detail = api_get(f"/reports/{partner_id}/{report_key}")
                     if detail:
-                        level = detail.get("risk_level", "")
+                        level = detail.get("batch_risk_level", "")
                         color = risk_color(level)
-                        st.markdown(f"**Risk Level**: :{color}[**{level}**]")
+                        st.markdown(f"**Batch Risk Level**: :{color}[**{level}**]")
 
                         col1, col2, col3 = st.columns(3)
-                        col1.metric("Risk Score",       f"{detail.get('risk_score', '?')} / 100")
-                        col2.metric("Anomaly",          "Yes" if detail.get("anomaly") else "No")
-                        col3.metric("Query ID",         str(detail.get("query_id", ""))[:8] + "...")
+                        col1.metric("Flagged Users",        detail.get("flagged_users",    "?"))
+                        col2.metric("Total Queries",        detail.get("total_queries",    "?"))
+                        col3.metric("Batch ID",             str(detail.get("batch_id", ""))[:8] + "...")
 
-                        st.subheader("Feature Vector")
-                        st.json(detail.get("features", {}))
+                        st.subheader("User Results")
+                        user_results = detail.get("user_results", [])
+                        if user_results:
+                            flagged = [u for u in user_results if u.get("risk_level") in ("HIGH", "CRITICAL")]
+                            if flagged:
+                                st.error(f"{len(flagged)} flagged user(s):")
+                                st.dataframe(pd.DataFrame(flagged), use_container_width=True)
 
                         st.subheader("Full Report")
                         st.json(detail)
             else:
-                st.info(f"No attack reports found for model **{model_id}**.")
+                st.info(f"No theft reports found for partner **{partner_id}**.")

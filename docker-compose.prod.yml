@@ -1,0 +1,20 @@
+# Production overlay — uses pre-built GHCR images instead of local builds.
+# Replace <owner> with the GitHub user/org that owns the GHCR packages.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    build: null
+    image: ghcr.io/i-sheng/modelguard-backend:latest
+    volumes: []   # remove dev hot-reload mount
+
+  frontend:
+    build: null
+    image: ghcr.io/i-sheng/modelguard-frontend:latest
+
+  oe-dashboard:
+    build: null
+    image: ghcr.io/i-sheng/modelguard-oe-dashboard:latest
+    volumes: []   # remove dev hot-reload mount

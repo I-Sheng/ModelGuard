@@ -54,8 +54,9 @@
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
-    #user-bar .role-badge.customer { background: #7c3aed; }
-    #user-bar .role-badge.admin    { background: #b91c1c; }
+    #user-bar .role-badge.analyst { background: #0891b2; }
+    #user-bar .role-badge.partner { background: #7c3aed; }
+    #user-bar .role-badge.admin   { background: #b91c1c; }
     #user-bar button {
       margin-left: auto;
       background: none;
@@ -126,9 +127,9 @@
     <span class="shield">🛡️</span>
     <div class="text">
       <h1>ModelGuard AI — SwaggerAI</h1>
-      <span class="sub">Real-time ML model theft detection · Interactive API console</span>
+      <span class="sub">Batch model theft detection · Interactive API console</span>
     </div>
-    <span class="badge">v0.2.0-oss</span>
+    <span class="badge">v0.3.0-oss</span>
   </div>
 
   <!-- Authenticated user bar (shown after login) -->
@@ -144,7 +145,7 @@
       <h2>Sign in to ModelGuard</h2>
       <p>Enter your credentials to access the API console.</p>
       <label for="username">Username</label>
-      <input id="username" type="text" placeholder="e.g. ml_user" autocomplete="username" />
+      <input id="username" type="text" placeholder="e.g. partner1" autocomplete="username" />
       <label for="password">Password</label>
       <input id="password" type="password" placeholder="Password" autocomplete="current-password"
              onkeydown="if(event.key==='Enter') doLogin()" />
@@ -211,15 +212,16 @@
       const roleBadge = document.getElementById('user-role-badge');
       document.getElementById('user-name').textContent = username;
       roleBadge.textContent = role.replace('_', ' ');
-      if (role === 'customer') roleBadge.classList.add('customer');
-      if (role === 'admin')    roleBadge.classList.add('admin');
+      if (role === 'analyst') roleBadge.classList.add('analyst');
+      if (role === 'partner') roleBadge.classList.add('partner');
+      if (role === 'admin')   roleBadge.classList.add('admin');
       userBar.style.display = 'flex';
 
       const specUrl = role === 'admin'
         ? '/api/openapi-admin.json'
-        : role === 'customer'
-          ? '/api/openapi-customer.json'
-          : '/api/openapi-ml.json';
+        : role === 'partner'
+          ? '/api/openapi-partner.json'
+          : '/api/openapi-analyst.json';
 
       SwaggerUIBundle({
         url: specUrl,
