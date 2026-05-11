@@ -494,11 +494,14 @@ async def partner_activity(_user: dict = Depends(_ANY_AUTHED)):
             if pid not in partner_data:
                 partner_data[pid] = {"total_batches": 0, "last_modified": None}
             partner_data[pid]["total_batches"] += 1
-            if obj.last_modified and (
+            lm = obj.last_modified
+            if lm and lm.tzinfo is None:
+                lm = lm.replace(tzinfo=timezone.utc)
+            if lm and (
                 partner_data[pid]["last_modified"] is None
-                or obj.last_modified > partner_data[pid]["last_modified"]
+                or lm > partner_data[pid]["last_modified"]
             ):
-                partner_data[pid]["last_modified"] = obj.last_modified
+                partner_data[pid]["last_modified"] = lm
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
