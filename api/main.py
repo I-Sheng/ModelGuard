@@ -267,6 +267,13 @@ class StatsResponse(BaseModel):
     timestamp:              str
 
 
+class PartnerActivityItem(BaseModel):
+    partner_id:             str
+    total_batches:          int
+    last_seen:              str
+    hours_since_last_batch: float
+
+
 # ---------------------------------------------------------------------------
 # Feature extraction
 # ---------------------------------------------------------------------------
@@ -470,6 +477,45 @@ async def stats(_user: dict = Depends(_ANY_AUTHED)):
         minio=minio_ok,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
+
+
+@app.get("/stats/partners", response_model=list[PartnerActivityItem])
+async def partner_activity(_user: dict = Depends(_ANY_AUTHED)):
+    """Per-partner last-seen timestamp and batch count for integration health monitoring."""
+    mc = get_minio()
+    now = datetime.now(timezone.utc)
+    partner_data: dict[str, dict] = {}
+    try:
+        for obj in mc.list_objects(BUCKET_AUDITLOG, recursive=True):
+            parts = obj.object_name.split("/")
+            if not parts[0]:
+                continue
+            pid = parts[0]
+            if pid not in partner_data:
+                partner_data[pid] = {"total_batches": 0, "last_modified": None}
+            partner_data[pid]["total_batches"] += 1
+            lm = obj.last_modified
+            if lm and lm.tzinfo is None:
+                lm = lm.replace(tzinfo=timezone.utc)
+            if lm and (
+                partner_data[pid]["last_modified"] is None
+                or lm > partner_data[pid]["last_modified"]
+            ):
+                partner_data[pid]["last_modified"] = lm
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    result = []
+    for pid, data in sorted(partner_data.items()):
+        last_mod = data["last_modified"]
+        hours = round((now - last_mod).total_seconds() / 3600, 1) if last_mod else -1.0
+        result.append(PartnerActivityItem(
+            partner_id=pid,
+            total_batches=data["total_batches"],
+            last_seen=last_mod.isoformat() if last_mod else "unknown",
+            hours_since_last_batch=hours,
+        ))
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -63,7 +63,7 @@ st.sidebar.caption("Operations & Engineering Monitoring")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["System Health", "Statistics", "Audit Logs", "Theft Reports"],
+    ["System Health", "Statistics", "Partner Activity", "Audit Logs", "Theft Reports"],
 )
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,59 @@ elif page == "Statistics":
         col4.metric("MinIO",                 stats.get("minio",    "—").upper())
     else:
         st.warning("Could not fetch stats from backend.")
+
+
+elif page == "Partner Activity":
+    st.title("Partner Activity")
+    st.caption("Early alert: partners with no recent batch submissions may have a broken integration.")
+
+    rows = api_get("/stats/partners")
+    if rows is None:
+        st.error("Could not fetch partner activity from backend.")
+    elif not rows:
+        st.info("No partner audit logs found yet.")
+    else:
+        STALE_HOURS = 24
+        stale = [r for r in rows if r["hours_since_last_batch"] < 0 or r["hours_since_last_batch"] > STALE_HOURS]
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Partners",  len(rows))
+        col2.metric("Active (≤24 h)",  len(rows) - len(stale))
+        col3.metric("Stale (>24 h)",   len(stale), delta=f"-{len(stale)}" if stale else None,
+                    delta_color="inverse")
+
+        if stale:
+            st.warning(f"{len(stale)} partner(s) have not submitted a batch in over {STALE_HOURS} hours — verify their integration is still running.")
+
+        st.divider()
+
+        df = pd.DataFrame(rows)
+        df["status"] = df["hours_since_last_batch"].apply(
+            lambda h: "STALE" if h < 0 or h > STALE_HOURS else "OK"
+        )
+        df = df.sort_values("hours_since_last_batch", ascending=False)
+        st.dataframe(
+            df[["partner_id", "total_batches", "last_seen", "hours_since_last_batch", "status"]],
+            use_container_width=True,
+        )
+
+        st.divider()
+        fig = go.Figure(go.Bar(
+            x=df["partner_id"],
+            y=df["hours_since_last_batch"].clip(lower=0),
+            marker_color=["red" if s == "STALE" else "green" for s in df["status"]],
+            text=[f"{h:.1f}h" for h in df["hours_since_last_batch"].clip(lower=0)],
+            textposition="outside",
+        ))
+        fig.add_hline(y=STALE_HOURS, line_dash="dash", line_color="orange",
+                      annotation_text="24 h alert threshold")
+        fig.update_layout(
+            yaxis_title="Hours since last batch",
+            xaxis_title="Partner",
+            height=350,
+            margin=dict(t=30, b=20),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 elif page == "Audit Logs":
