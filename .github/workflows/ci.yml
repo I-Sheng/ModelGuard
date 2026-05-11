@@ -95,6 +95,10 @@ jobs:
         run: bunx jest security.test.ts
         working-directory: tests
 
+      - name: Dump backend logs
+        if: failure()
+        run: docker compose logs backend
+
       - name: Tear down
         if: always()
         run: docker compose down -v
