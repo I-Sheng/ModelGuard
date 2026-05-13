@@ -55,6 +55,10 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+      # minio-init creates the three buckets; without this, the backend can start
+      # before buckets exist and MinIO returns AccessDenied instead of NoSuchBucket.
+      minio-init:
+        condition: service_completed_successfully
     environment:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
