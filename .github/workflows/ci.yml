@@ -42,7 +42,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 3: Integration tests — full Docker Compose stack
   # Requires these GitHub repository secrets to be configured:
-  #   MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+  #   MINIO_ROOT_USER, MINIO_ROOT_PASSWORD
   #   JWT_SECRET_KEY, OE_ADMIN_USER, OE_ADMIN_PASSWORD
   #   ANALYST1_PASSWORD, PARTNER1_PASSWORD, ADMIN_PASSWORD
   # ---------------------------------------------------------------------------
@@ -58,8 +58,6 @@ jobs:
           cat > .env <<EOF
           MINIO_ROOT_USER=${{ secrets.MINIO_ROOT_USER }}
           MINIO_ROOT_PASSWORD=${{ secrets.MINIO_ROOT_PASSWORD }}
-          MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}
-          MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           OE_ADMIN_USER=${{ secrets.OE_ADMIN_USER }}
           OE_ADMIN_PASSWORD=${{ secrets.OE_ADMIN_PASSWORD }}
