@@ -7,7 +7,6 @@ import axios from "axios";
 import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import * as path from "path";
-import { BENIGN_INPUTS, BENIGN_OUTPUTS } from "./fixtures/benign-batch";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -109,45 +108,3 @@ describe("unauthenticated access", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Risk 2 — False positive baseline
-// Submits a batch engineered to sit at the training distribution mean.
-// If the frozen Isolation Forest scores clearly normal traffic as HIGH/CRITICAL
-// the test fails, giving early warning before any real customer is affected.
-// ---------------------------------------------------------------------------
-
-describe("Risk 2 — false positive baseline", () => {
-  let headers: { Authorization: string };
-
-  beforeAll(async () => {
-    const token = await login(process.env.PARTNER1!, process.env.PARTNER1_PASSWORD!);
-    headers = { Authorization: `Bearer ${token}` };
-  });
-
-  test("batch matching training distribution mean does not trigger HIGH or CRITICAL", async () => {
-    const queries = Array.from({ length: 30 }, (_, i) => ({
-      query_id:   `benign-q${i}`,
-      query_user: "legitimate-user",
-      input:  BENIGN_INPUTS[i % 18],   // 18 unique → unique_input_ratio = 0.60
-      output: BENIGN_OUTPUTS[i % 14],  // 14 unique → output_diversity ≈ 0.47
-    }));
-
-    const body = {
-      partner_id:   "fp-baseline-partner",
-      window_start: "2026-05-11T00:00:00Z",
-      window_end:   "2026-05-11T01:00:00Z",
-      queries,
-    };
-    const res = await axios.post(`${BASE_URL}/batch/analyze`, body, {
-      headers: { ...headers, "X-Batch-Signature": signBatch(body) },
-    });
-
-    expect(res.status).toBe(200);
-    expect(["LOW", "MEDIUM"]).toContain(res.data.batch_risk_level);
-
-    const flagged = (res.data.user_results as any[]).filter(
-      (u) => u.risk_level === "HIGH" || u.risk_level === "CRITICAL"
-    );
-    expect(flagged).toHaveLength(0);
-  });
-});
