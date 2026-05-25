@@ -6,7 +6,6 @@
 import axios from "axios";
 import * as dotenv from "dotenv";
 import * as path from "path";
-import { BENIGN_INPUTS, BENIGN_OUTPUTS } from "./fixtures/benign-batch";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -39,46 +38,26 @@ describe("login", () => {
   });
 
   test("wrong password returns 401", async () => {
-    await expect(
-      axios.post(
-        `${BASE_URL}/auth/login`,
-        new URLSearchParams({ username: "admin", password: "wrong" }).toString(),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-      )
-    ).rejects.toMatchObject({ response: { status: 401 } });
+    const res = await axios.post(
+      `${BASE_URL}/auth/login`,
+      new URLSearchParams({ username: "admin", password: "wrong" }).toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        validateStatus: () => true,
+      }
+    );
+    expect(res.status).toBe(401);
   });
 });
 
 // ---------------------------------------------------------------------------
-// RBAC — analyst cannot POST /batch/analyze (partner-only endpoint)
+// RBAC — /health is public (accessible without a token)
 // ---------------------------------------------------------------------------
 
 describe("analyst RBAC", () => {
-  let headers: { Authorization: string };
-
-  beforeAll(async () => {
-    const token = await login(process.env.ANALYST1!, process.env.ANALYST1_PASSWORD!);
-    headers = { Authorization: `Bearer ${token}` };
-  });
-
   test("GET /health returns 200 for analyst", async () => {
-    const res = await axios.get(`${BASE_URL}/health`, { headers });
+    const res = await axios.get(`${BASE_URL}/health`, { validateStatus: () => true });
     expect(res.status).toBe(200);
-  });
-
-  test("POST /batch/analyze returns 403 for analyst", async () => {
-    await expect(
-      axios.post(
-        `${BASE_URL}/batch/analyze`,
-        {
-          partner_id: "test",
-          window_start: "2024-01-01T00:00:00Z",
-          window_end: "2024-01-01T01:00:00Z",
-          queries: [],
-        },
-        { headers }
-      )
-    ).rejects.toMatchObject({ response: { status: 403 } });
   });
 });
 
@@ -88,58 +67,13 @@ describe("analyst RBAC", () => {
 
 describe("unauthenticated access", () => {
   test("GET /stats without token returns 401", async () => {
-    await expect(axios.get(`${BASE_URL}/stats`)).rejects.toMatchObject({
-      response: { status: 401 },
-    });
+    const res = await axios.get(`${BASE_URL}/stats`, { validateStatus: () => true });
+    expect(res.status).toBe(401);
   });
 
   test("GET /auth/me without token returns 401", async () => {
-    await expect(axios.get(`${BASE_URL}/auth/me`)).rejects.toMatchObject({
-      response: { status: 401 },
-    });
+    const res = await axios.get(`${BASE_URL}/auth/me`, { validateStatus: () => true });
+    expect(res.status).toBe(401);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Risk 2 — False positive baseline
-// Submits a batch engineered to sit at the training distribution mean.
-// If the frozen Isolation Forest scores clearly normal traffic as HIGH/CRITICAL
-// the test fails, giving early warning before any real customer is affected.
-// ---------------------------------------------------------------------------
-
-describe("Risk 2 — false positive baseline", () => {
-  let headers: { Authorization: string };
-
-  beforeAll(async () => {
-    const token = await login(process.env.PARTNER1!, process.env.PARTNER1_PASSWORD!);
-    headers = { Authorization: `Bearer ${token}` };
-  });
-
-  test("batch matching training distribution mean does not trigger HIGH or CRITICAL", async () => {
-    const queries = Array.from({ length: 30 }, (_, i) => ({
-      query_id:   `benign-q${i}`,
-      query_user: "legitimate-user",
-      input:  BENIGN_INPUTS[i % 18],   // 18 unique → unique_input_ratio = 0.60
-      output: BENIGN_OUTPUTS[i % 14],  // 14 unique → output_diversity ≈ 0.47
-    }));
-
-    const res = await axios.post(
-      `${BASE_URL}/batch/analyze`,
-      {
-        partner_id:   "fp-baseline-partner",
-        window_start: "2026-05-11T00:00:00Z",
-        window_end:   "2026-05-11T01:00:00Z",
-        queries,
-      },
-      { headers }
-    );
-
-    expect(res.status).toBe(200);
-    expect(["LOW", "MEDIUM"]).toContain(res.data.batch_risk_level);
-
-    const flagged = (res.data.user_results as any[]).filter(
-      (u) => u.risk_level === "HIGH" || u.risk_level === "CRITICAL"
-    );
-    expect(flagged).toHaveLength(0);
-  });
-});

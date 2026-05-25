@@ -38,8 +38,10 @@ services:
       /bin/sh -c "
         mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
         mc mb --ignore-existing local/modelguard-detectors &&
-        mc mb --ignore-existing local/modelguard-auditlog &&
-        mc mb --ignore-existing local/modelguard-reports &&
+        mc mb --ignore-existing --with-lock local/modelguard-auditlog &&
+        mc retention set --default GOVERNANCE 30d local/modelguard-auditlog &&
+        mc mb --ignore-existing --with-lock local/modelguard-reports &&
+        mc retention set --default GOVERNANCE 30d local/modelguard-reports &&
         echo 'Buckets ready.'
       "
 
@@ -60,6 +62,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      BATCH_HMAC_SECRET: ${BATCH_HMAC_SECRET}
       ANALYST1_PASSWORD: ${ANALYST1_PASSWORD}
       PARTNER1_PASSWORD: ${PARTNER1_PASSWORD}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}

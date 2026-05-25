@@ -4,6 +4,8 @@ Partners submit query logs; ModelGuard detects model extraction campaigns.
 MinIO stores: the Isolation Forest detector model, batch audit logs, theft reports.
 """
 
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -109,6 +111,27 @@ def require_role(*roles: str):
 
 _ANY_AUTHED = require_role("analyst", "partner", "admin")
 _PARTNER    = require_role("partner", "admin")
+
+# ---------------------------------------------------------------------------
+# Batch HMAC — T-01 mitigation
+# Partners sign the raw JSON request body with HMAC-SHA256 before submission.
+# Header: X-Batch-Signature: sha256=<hexdigest>
+# ---------------------------------------------------------------------------
+BATCH_HMAC_SECRET = os.getenv("BATCH_HMAC_SECRET", "")
+
+
+async def verify_batch_signature(request: Request) -> None:
+    if not BATCH_HMAC_SECRET:
+        raise HTTPException(status_code=500, detail="Batch signing not configured")
+    sig_header = request.headers.get("X-Batch-Signature", "")
+    if not sig_header.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Missing or malformed X-Batch-Signature header")
+    body = await request.body()
+    expected = "sha256=" + hmac.new(
+        BATCH_HMAC_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig_header, expected):
+        raise HTTPException(status_code=401, detail="Invalid batch signature")
 
 # ---------------------------------------------------------------------------
 # MinIO client
@@ -522,10 +545,13 @@ async def partner_activity(_user: dict = Depends(_ANY_AUTHED)):
 # Batch detection endpoint
 # ---------------------------------------------------------------------------
 @app.post("/batch/analyze", response_model=BatchAnalyzeResponse, tags=["detection"])
+@limiter.limit("60/minute")
 async def batch_analyze(
+    request: Request,
     req: BatchAnalyzeRequest,
     background_tasks: BackgroundTasks,
     _user: dict = Depends(_PARTNER),
+    _sig: None = Depends(verify_batch_signature),
 ):
     """
     Analyze a batch of query records for model theft patterns.
