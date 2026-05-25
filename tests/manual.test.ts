@@ -4,10 +4,20 @@
  */
 
 import axios from "axios";
+import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import * as path from "path";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
+
+function signBatch(body: object): string {
+  const raw = JSON.stringify(body);
+  const digest = crypto
+    .createHmac("sha256", process.env.BATCH_HMAC_SECRET!)
+    .update(raw)
+    .digest("hex");
+  return `sha256=${digest}`;
+}
 
 const BASE_URL = "http://localhost:8000";
 
@@ -41,23 +51,22 @@ describe("Risk 3 — partner activity monitoring", () => {
   });
 
   test("/stats/partners shows partner with hours_since_last_batch < 1 after submission", async () => {
-    await axios.post(
-      `${BASE_URL}/batch/analyze`,
-      {
-        partner_id:   TEST_PARTNER,
-        window_start: "2026-05-11T00:00:00Z",
-        window_end:   "2026-05-11T01:00:00Z",
-        queries: [
-          {
-            query_id:   "activity-q0",
-            query_user: "activity-user",
-            input:  "How does attention work in transformer architectures?",
-            output: "Attention maps inputs to outputs using query, key, and value projections.",
-          },
-        ],
-      },
-      { headers: partnerHeaders }
-    );
+    const body = {
+      partner_id:   TEST_PARTNER,
+      window_start: "2026-05-11T00:00:00Z",
+      window_end:   "2026-05-11T01:00:00Z",
+      queries: [
+        {
+          query_id:   "activity-q0",
+          query_user: "activity-user",
+          input:  "How does attention work in transformer architectures?",
+          output: "Attention maps inputs to outputs using query, key, and value projections.",
+        },
+      ],
+    };
+    await axios.post(`${BASE_URL}/batch/analyze`, body, {
+      headers: { ...partnerHeaders, "X-Batch-Signature": signBatch(body) },
+    });
 
     const res = await axios.get(`${BASE_URL}/stats/partners`, { headers: adminHeaders });
     expect(res.status).toBe(200);

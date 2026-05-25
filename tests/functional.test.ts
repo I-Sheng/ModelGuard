@@ -4,11 +4,21 @@
  */
 
 import axios from "axios";
+import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import * as path from "path";
 import { BENIGN_INPUTS, BENIGN_OUTPUTS } from "./fixtures/benign-batch";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
+
+function signBatch(body: object): string {
+  const raw = JSON.stringify(body);
+  const digest = crypto
+    .createHmac("sha256", process.env.BATCH_HMAC_SECRET!)
+    .update(raw)
+    .digest("hex");
+  return `sha256=${digest}`;
+}
 
 const BASE_URL = "http://localhost:8000";
 
@@ -39,13 +49,15 @@ describe("login", () => {
   });
 
   test("wrong password returns 401", async () => {
-    await expect(
-      axios.post(
-        `${BASE_URL}/auth/login`,
-        new URLSearchParams({ username: "admin", password: "wrong" }).toString(),
-        { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-      )
-    ).rejects.toMatchObject({ response: { status: 401 } });
+    const res = await axios.post(
+      `${BASE_URL}/auth/login`,
+      new URLSearchParams({ username: "admin", password: "wrong" }).toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        validateStatus: () => true,
+      }
+    );
+    expect(res.status).toBe(401);
   });
 });
 
@@ -67,18 +79,17 @@ describe("analyst RBAC", () => {
   });
 
   test("POST /batch/analyze returns 403 for analyst", async () => {
-    await expect(
-      axios.post(
-        `${BASE_URL}/batch/analyze`,
-        {
-          partner_id: "test",
-          window_start: "2024-01-01T00:00:00Z",
-          window_end: "2024-01-01T01:00:00Z",
-          queries: [],
-        },
-        { headers }
-      )
-    ).rejects.toMatchObject({ response: { status: 403 } });
+    const body = {
+      partner_id: "test",
+      window_start: "2024-01-01T00:00:00Z",
+      window_end: "2024-01-01T01:00:00Z",
+      queries: [],
+    };
+    const res = await axios.post(`${BASE_URL}/batch/analyze`, body, {
+      headers: { ...headers, "X-Batch-Signature": signBatch(body) },
+      validateStatus: () => true,
+    });
+    expect(res.status).toBe(403);
   });
 });
 
@@ -88,15 +99,13 @@ describe("analyst RBAC", () => {
 
 describe("unauthenticated access", () => {
   test("GET /stats without token returns 401", async () => {
-    await expect(axios.get(`${BASE_URL}/stats`)).rejects.toMatchObject({
-      response: { status: 401 },
-    });
+    const res = await axios.get(`${BASE_URL}/stats`, { validateStatus: () => true });
+    expect(res.status).toBe(401);
   });
 
   test("GET /auth/me without token returns 401", async () => {
-    await expect(axios.get(`${BASE_URL}/auth/me`)).rejects.toMatchObject({
-      response: { status: 401 },
-    });
+    const res = await axios.get(`${BASE_URL}/auth/me`, { validateStatus: () => true });
+    expect(res.status).toBe(401);
   });
 });
 
@@ -123,16 +132,15 @@ describe("Risk 2 — false positive baseline", () => {
       output: BENIGN_OUTPUTS[i % 14],  // 14 unique → output_diversity ≈ 0.47
     }));
 
-    const res = await axios.post(
-      `${BASE_URL}/batch/analyze`,
-      {
-        partner_id:   "fp-baseline-partner",
-        window_start: "2026-05-11T00:00:00Z",
-        window_end:   "2026-05-11T01:00:00Z",
-        queries,
-      },
-      { headers }
-    );
+    const body = {
+      partner_id:   "fp-baseline-partner",
+      window_start: "2026-05-11T00:00:00Z",
+      window_end:   "2026-05-11T01:00:00Z",
+      queries,
+    };
+    const res = await axios.post(`${BASE_URL}/batch/analyze`, body, {
+      headers: { ...headers, "X-Batch-Signature": signBatch(body) },
+    });
 
     expect(res.status).toBe(200);
     expect(["LOW", "MEDIUM"]).toContain(res.data.batch_risk_level);

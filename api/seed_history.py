@@ -21,11 +21,12 @@ Three partners, each with a distinct narrative:
     Days 1–0       : clean again (attacker stopped)
     Theft reports  : 3  (3× CRITICAL)
 
-  cohere-demo     (12 batches) — clean throughout
-    7 days of clean traffic (all LOW)
+  cohere-demo     (9 batches) — clean throughout, last batch 2 days ago (stale)
+    Days 7–2 back : clean traffic (all LOW)
+    Days 1–0      : no batches (integration appears inactive)
     Theft reports  : 0
 
-Grand total: 41 batches, 9 theft reports across 3 partners.
+Grand total: 38 batches, 9 theft reports across 3 partners.
 """
 
 import io
@@ -271,7 +272,7 @@ PARTNER = "cohere-demo"
 counts  = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
 
 for d, h in [(7, 8), (7, 20), (6, 8), (6, 20), (5, 9), (4, 11),
-             (3, 8), (3, 20), (2, 9), (1, 10), (1, 22), (0, 10)]:
+             (3, 8), (3, 20), (2, 9)]:
     level = write_batch(PARTNER, ts(d, h),
                         make_normal_users(rng.randint(80, 180), "coh-usr", id_offset=d * 400 + h))
     counts[level] += 1
@@ -290,12 +291,12 @@ print("Done. MinIO now contains:")
 print("  Bucket: modelguard-auditlog")
 print("    openai-demo/     16 batch records  (escalating campaign)")
 print("    anthropic-demo/  13 batch records  (burst then clean)")
-print("    cohere-demo/     12 batch records  (clean throughout)")
+print("    cohere-demo/      9 batch records  (clean throughout, last batch 2 days ago)")
 print("  Bucket: modelguard-reports")
 print("    openai-demo/      6 reports  (HIGH + CRITICAL)")
 print("    anthropic-demo/   3 reports  (CRITICAL)")
 print()
 print("OE Dashboard quick-check:")
-print("  http://localhost:8501  →  Statistics page: 3 partners, 41 batches")
+print("  http://localhost:8501  →  Statistics page: 3 partners, 38 batches")
 print("  Audit Logs: enter 'openai-demo' or 'anthropic-demo' or 'cohere-demo'")
 print("  Theft Reports: enter 'openai-demo' to see the escalating campaign")
