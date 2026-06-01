@@ -24,64 +24,25 @@ Mock payloads for this incident are in `tests/fixtures/hmac-batch-fixtures.ts`:
 
 ## Possible Causes of a Wrong HMAC
 
-### Misconfiguration
-
-**Wrong or missing secret** — The partner is signing with a different `BATCH_HMAC_SECRET` than what the backend has. This happens when:
-- The `.env` on the partner side was never updated after the secret rotated
-- The backend container was restarted with a new secret but the partner wasn't notified
-- `BATCH_HMAC_SECRET` is empty on one side — the backend returns `500 Batch signing not configured` in that case
-
-### Implementation bugs on the partner side
-
-**Body serialization mismatch** — The signature must be computed over the exact bytes that get sent. Common ways this goes wrong:
-- Partner computes HMAC over a Python `dict` (`str(payload)`) but sends JSON — they're different bytes
-- Partner uses `json.dumps(payload)` with different settings than the HTTP client (different key ordering, spacing, or unicode escaping)
-- A different HTTP client serializes the JSON body differently from what the HMAC was computed over
-
-**Encoding issues** — Partner computes HMAC over a UTF-8 string but the HTTP client sends Latin-1, or a trailing newline is added or removed before sending.
-
-**Header format wrong** — The backend expects `sha256=<hex>`. Sending just `<hex>` or `SHA256=<hex>` fails the prefix check before the digest is even compared.
-
-### Deliberate tampering (the T-01 threat)
-
-**Body modified in transit** — Someone between the partner and the backend (a proxy, a compromised integration layer) altered the query records after the signature was computed. This is the `TAMPERED_BATCH` scenario — the signature is real but it belongs to the original body, not the modified one.
-
-**Forged signature** — An attacker submits a made-up hex string as the signature without knowing the secret. This is `FORGED_SIGNATURE` — it looks plausible but won't match any real HMAC.
-
-### How to tell which reason it is
-
-| Observation | Likely cause |
-|---|---|
-| Backend logs `500 Batch signing not configured` | `BATCH_HMAC_SECRET` missing from backend env |
-| `401` on every request from one partner | Partner has a wrong or stale secret |
-| `401` on some requests but not others | Body serialization inconsistency on partner side |
-| `HMAC_SIGNATURE_FAILURE` shows a `partner_id` that doesn't match any known integration | Forged / attacker-originated request |
-| Sudden `401` after a deployment | Secret rotated without notifying the partner |
+| Category | Cause | Observation |
+|---|---|---|
+| Misconfiguration | Wrong or missing `BATCH_HMAC_SECRET` — partner's key doesn't match the backend's | `401` on every request from one partner |
+| Misconfiguration | Secret absent on the backend side | `500 Batch signing not configured` in logs |
+| Misconfiguration | Secret rotated without notifying the partner | Sudden `401` after a deployment |
+| Implementation bug | Body serialization mismatch — HMAC computed over different bytes than what was sent (e.g. different key ordering, spacing, or encoding) | `401` on some requests but not others |
+| Implementation bug | Wrong header format — backend expects `sha256=<hex>`; sending bare `<hex>` fails the prefix check | `401` with `Missing or malformed` detail |
+| Deliberate tampering | Body modified in transit — signature is real but belongs to the original unmodified body | `HMAC_SIGNATURE_FAILURE` log; known `api_user` |
+| Deliberate tampering | Forged signature — attacker submits a made-up hex string without knowing the secret | `HMAC_SIGNATURE_FAILURE` log; unknown or suspicious `api_user` |
 
 ---
 
 ## Phase 1 — Detection
 
-### 1.1 Run the T-01 security tests
+### 1.1 OE Dashboard — Partner Activity
 
-The primary alert is `security.test.ts` reporting a failure on the T-01 block:
+Open the OE Dashboard and navigate to **Partner Activity**. Scroll to the **HMAC Signature Failures** section at the bottom of the page. Any invalid batch attempt is listed here with its timestamp, `api_user`, and `partner_id`.
 
-```bash
-cd tests && bun test security.test.ts --verbose
-```
-
-The test suite sends two mock requests to `/batch/analyze`:
-
-| Request | Payload | Signature | Expected |
-|---|---|---|---|
-| Forged | `TAMPERED_BATCH` | `FORGED_SIGNATURE` (wrong) | `401` |
-| Valid | `VALID_HMAC_BATCH` | Correct HMAC-SHA256 | `200` |
-
-**Failure means**: the forged request returned `200` — the HMAC check is not enforced.
-
-### 1.2 Grep for signature failures in logs
-
-If a forged batch was submitted against a running stack, the backend emits a structured warning:
+### 1.2 Docker backend log
 
 ```bash
 docker compose logs --tail=500 backend | grep HMAC_SIGNATURE_FAILURE
@@ -90,62 +51,28 @@ docker compose logs --tail=500 backend | grep HMAC_SIGNATURE_FAILURE
 Each line looks like:
 
 ```
-2026-05-31 09:14:22 WARNING HMAC_SIGNATURE_FAILURE partner_id=openai-demo api_user=partner1
+2026-05-31 09:14:22 WARNING HMAC_SIGNATURE_FAILURE partner_id=openai-demo api_user=bad-actor
 ```
 
-This tells you:
-- **`partner_id`** — the business entity whose data was tampered (`openai-demo`)
-- **`api_user`** — the authenticated API account that sent the request (`partner1`)
-
-### 1.3 Verify the HMAC check is wired in source
-
-```bash
-grep -n "verify_batch_signature\|BATCH_HMAC_SECRET\|hmac.compare_digest" api/main.py
-```
-
-Confirm all four lines are present:
-
-| Line | Expected content |
-|---|---|
-| Secret load | `BATCH_HMAC_SECRET = os.getenv("BATCH_HMAC_SECRET", "")` |
-| Dependency | `async def verify_batch_signature(request: Request)` |
-| Digest compare | `hmac.compare_digest(sig_header, expected)` |
-| Route wiring | `_sig: None = Depends(verify_batch_signature)` in `batch_analyze` |
-
-### 1.4 Check BATCH_HMAC_SECRET is set
-
-A missing secret causes every `/batch/analyze` call to return `500 Batch signing not configured`:
-
-```bash
-docker compose logs --tail=200 backend | grep "Batch signing not configured"
-```
-
-If this line appears, the secret is absent — skip to Phase 2.1.
-
-### 1.5 Confirm the running image is current
-
-```bash
-docker inspect modelguard-backend-1 --format '{{.Created}}'
-```
-
-Compare against the commit that introduced `verify_batch_signature`. If the image predates that commit, the container is running stale code — skip to Phase 2.2.
+- **`api_user`** — the authenticated account that sent the forged request; this is the target for suspension
+- **`partner_id`** — the business entity named in the payload
 
 ---
 
 ## Phase 2 — Response
 
-### 2.1 Identify the offending partner and API user
+### 2.1 Identify the offending API user
 
 From the `HMAC_SIGNATURE_FAILURE` log line collected in step 1.2:
 
 ```
-HMAC_SIGNATURE_FAILURE partner_id=openai-demo api_user=partner1
+HMAC_SIGNATURE_FAILURE partner_id=openai-demo api_user=bad-actor
 ```
 
-- `partner_id` is the party whose batch data was tampered.
-- `api_user` is the authenticated account that submitted it — use this to contact or escalate to the partner's technical team.
+- **`api_user`** is the authenticated API account that sent the request — this is the target for suspension. It is verified by JWT and cannot be spoofed.
+- `partner_id` is the business entity named in the payload — useful context but user-supplied and not reliable for access control.
 
-If multiple `HMAC_SIGNATURE_FAILURE` lines appear, group them by `partner_id` and `api_user` to scope the incident:
+If multiple `HMAC_SIGNATURE_FAILURE` lines appear, group them by `api_user` to scope the incident:
 
 ```bash
 docker compose logs --tail=1000 backend \
@@ -154,9 +81,9 @@ docker compose logs --tail=1000 backend \
   | sort | uniq -c | sort -rn
 ```
 
-### 2.2 Suspend the offending partner
+### 2.2 Suspend the offending user
 
-Once you have confirmed the `partner_id`, obtain an admin token and call the suspend endpoint:
+Once you have confirmed the `api_user`, obtain an admin token and call the user suspend endpoint:
 
 ```bash
 source .env
@@ -164,44 +91,46 @@ ADMIN_TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
   -d "username=${ADMIN_USER}&password=${ADMIN_PASSWORD}" \
   -H "Content-Type: application/x-www-form-urlencoded" | jq -r .access_token)
 
-curl -s -X POST http://localhost:8000/admin/partners/openai-demo/suspend \
+curl -s -X POST http://localhost:8000/admin/users/bad-actor/suspend \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 ```
+
+Replace `bad-actor` with the `api_user` value from the log line.
 
 Expected response:
 
 ```json
-{ "partner_id": "openai-demo", "status": "suspended" }
+{ "username": "bad-actor", "status": "suspended" }
 ```
 
-From this point on, any `POST /batch/analyze` with `partner_id=openai-demo` returns `403 Partner is suspended` — queries are not processed.
+From this point on, any `POST /batch/analyze` from that user returns `403 User is suspended` — their queries are not processed regardless of what `partner_id` they supply.
 
 ### 2.3 Verify the suspension is active
 
-Check the suspended list:
+Check the suspended users list:
 
 ```bash
-curl -s http://localhost:8000/admin/partners/suspended \
+curl -s http://localhost:8000/admin/users/suspended \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 ```
 
-Attempt a batch submission as the partner — it must fail with `403`:
+Attempt a batch submission as the suspended user — it must fail with `403`:
 
 ```bash
 source .env
-PARTNER_TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
-  -d "username=${PARTNER1}&password=${PARTNER1_PASSWORD}" \
+BAD_TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
+  -d "username=${BAD_ACTOR}&password=${BAD_ACTOR_PASSWORD}" \
   -H "Content-Type: application/x-www-form-urlencoded" | jq -r .access_token)
 
 curl -s -X POST http://localhost:8000/batch/analyze \
-  -H "Authorization: Bearer $PARTNER_TOKEN" \
+  -H "Authorization: Bearer $BAD_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Batch-Signature: sha256=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
   -d '{"partner_id":"openai-demo","window_start":"2026-01-01T00:00:00Z","window_end":"2026-01-01T01:00:00Z","queries":[]}' \
   | jq .detail
 ```
 
-Expected: `"Partner is suspended"`
+Expected: `"User is suspended"`
 
 ### 2.4 Scope accepted batches from the suspect window
 
@@ -249,20 +178,20 @@ Both assertions must pass:
 
 ### 3.2 Lift the suspension when investigation is complete
 
-Once the partner's team has addressed the root cause and re-established a trusted signing integration:
+Once the user's account has been investigated and cleared:
 
 ```bash
-curl -s -X DELETE http://localhost:8000/admin/partners/openai-demo/suspend \
+curl -s -X DELETE http://localhost:8000/admin/users/bad-actor/suspend \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 ```
 
 Expected response:
 
 ```json
-{ "partner_id": "openai-demo", "status": "active" }
+{ "username": "bad-actor", "status": "active" }
 ```
 
-Confirm the partner can now submit valid batches again by running the valid-HMAC fixture from the T-01 security test or resubmitting a known-good batch.
+Confirm the user can now submit valid batches again by running the valid-HMAC fixture from the T-01 security test or resubmitting a known-good batch.
 
 ### 3.3 Run the full test suite for regressions
 
@@ -297,7 +226,7 @@ Record in the incident report:
 
 | Severity | Condition | Response |
 |---|---|---|
-| **P1 — Critical** | HMAC check inactive AND audit logs show batch submissions during that window | Immediate rebuild; suspend the partner; preserve all logs; notify partner; escalate to security team |
+| **P1 — Critical** | HMAC check inactive AND audit logs show batch submissions during that window | Immediate rebuild; suspend the offending user; preserve all logs; notify partner; escalate to security team |
 | **P2 — High** | HMAC check inactive but no batch submissions detected during the window | Rebuild and re-verify within 15 minutes |
 | **P3 — Medium** | Security test fails in CI but prod image is current and check is confirmed active | Investigate CI environment; no immediate prod action |
 
@@ -309,16 +238,16 @@ Record in the incident report:
 # Grep for forged-signature attempts
 docker compose logs --tail=1000 backend | grep HMAC_SIGNATURE_FAILURE
 
-# Suspend a partner (replace openai-demo with the actual partner_id)
-curl -s -X POST http://localhost:8000/admin/partners/openai-demo/suspend \
+# Suspend a user (replace bad-actor with the api_user from the log)
+curl -s -X POST http://localhost:8000/admin/users/bad-actor/suspend \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 
-# List all suspended partners
-curl -s http://localhost:8000/admin/partners/suspended \
+# List all suspended users
+curl -s http://localhost:8000/admin/users/suspended \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 
 # Lift a suspension
-curl -s -X DELETE http://localhost:8000/admin/partners/openai-demo/suspend \
+curl -s -X DELETE http://localhost:8000/admin/users/bad-actor/suspend \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 
 # Run T-01 security tests only

@@ -121,9 +121,9 @@ _PARTNER    = require_role("partner", "admin")
 # ---------------------------------------------------------------------------
 BATCH_HMAC_SECRET = os.getenv("BATCH_HMAC_SECRET", "")
 
-# Partners whose batch submissions have been suspended by an admin.
-# Populated at runtime via POST /admin/partners/{partner_id}/suspend.
-_SUSPENDED_PARTNERS: set[str] = set()
+# API users whose batch submissions have been suspended by an admin.
+# Populated at runtime via POST /admin/users/{username}/suspend.
+_SUSPENDED_USERS: set[str] = set()
 
 # In-memory log of HMAC signature failures for operator visibility.
 _HMAC_FAILURES: list[dict] = []
@@ -579,40 +579,41 @@ async def partner_activity(_user: dict = Depends(_ANY_AUTHED)):
 _ADMIN = require_role("admin")
 
 
-@app.post("/admin/partners/{partner_id}/suspend", tags=["admin"])
-async def suspend_partner(partner_id: str, _user: dict = Depends(_ADMIN)):
-    """Suspend a partner: all future /batch/analyze submissions will be rejected with 403."""
-    _SUSPENDED_PARTNERS.add(partner_id)
+@app.post("/admin/users/{username}/suspend", tags=["admin"])
+async def suspend_user(username: str, _user: dict = Depends(_ADMIN)):
+    """Suspend an API user: all future /batch/analyze submissions will be rejected with 403."""
+    _SUSPENDED_USERS.add(username)
     logger.warning(
-        "PARTNER_SUSPENDED partner_id=%s admin=%s",
-        partner_id,
+        "USER_SUSPENDED username=%s admin=%s",
+        username,
         _user["username"],
     )
-    return {"partner_id": partner_id, "status": "suspended"}
+    return {"username": username, "status": "suspended"}
 
 
-@app.delete("/admin/partners/{partner_id}/suspend", tags=["admin"])
-async def unsuspend_partner(partner_id: str, _user: dict = Depends(_ADMIN)):
-    """Lift a suspension, allowing the partner to submit batches again."""
-    _SUSPENDED_PARTNERS.discard(partner_id)
+@app.delete("/admin/users/{username}/suspend", tags=["admin"])
+async def unsuspend_user(username: str, _user: dict = Depends(_ADMIN)):
+    """Lift a user suspension, allowing them to submit batches again."""
+    _SUSPENDED_USERS.discard(username)
     logger.info(
-        "PARTNER_UNSUSPENDED partner_id=%s admin=%s",
-        partner_id,
+        "USER_UNSUSPENDED username=%s admin=%s",
+        username,
         _user["username"],
     )
-    return {"partner_id": partner_id, "status": "active"}
+    return {"username": username, "status": "active"}
 
 
-@app.get("/admin/partners/suspended", tags=["admin"])
-async def list_suspended_partners(_user: dict = Depends(_ADMIN)):
-    """List all currently suspended partner IDs."""
-    return {"suspended_partners": sorted(_SUSPENDED_PARTNERS)}
+@app.get("/admin/users/suspended", tags=["admin"])
+async def list_suspended_users(_user: dict = Depends(_ADMIN)):
+    """List all currently suspended API usernames."""
+    return {"suspended_users": sorted(_SUSPENDED_USERS)}
 
 
 @app.get("/admin/hmac-failures", tags=["admin"])
 async def list_hmac_failures(_user: dict = Depends(_ADMIN)):
     """Return all HMAC signature failures recorded since the last backend restart."""
     return {"hmac_failures": _HMAC_FAILURES}
+
 
 
 # ---------------------------------------------------------------------------
@@ -632,13 +633,13 @@ async def batch_analyze(
     Per-user behavioral features are extracted and scored by the Isolation Forest.
     Returns per-user risk scores and a batch-level risk assessment.
     """
-    if req.partner_id in _SUSPENDED_PARTNERS:
+    if _user["username"] in _SUSPENDED_USERS:
         logger.warning(
-            "PARTNER_SUSPENDED_REJECTION partner_id=%s api_user=%s",
-            req.partner_id,
+            "USER_SUSPENDED_REJECTION api_user=%s partner_id=%s",
             _user["username"],
+            req.partner_id,
         )
-        raise HTTPException(status_code=403, detail="Partner is suspended")
+        raise HTTPException(status_code=403, detail="User is suspended")
 
     batch_id = str(uuid.uuid4())
     ts = datetime.now(timezone.utc).isoformat()
