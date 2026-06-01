@@ -151,6 +151,14 @@ Both assertions must pass:
 - `TAMPERED_BATCH` with `FORGED_SIGNATURE` → `401`
 - `VALID_HMAC_BATCH` with correct signature → `200`
 
+Then run the full test suite for regressions:
+
+```bash
+cd tests && bun test --verbose
+```
+
+All tests must pass before closing the incident.
+
 ### 3.2 Lift the suspension when investigation is complete
 
 Once the user's account has been investigated and cleared:
@@ -168,24 +176,7 @@ Expected response:
 
 Confirm the user can now submit valid batches again by running the valid-HMAC fixture from the T-01 security test or resubmitting a known-good batch.
 
-### 3.3 Run the full test suite for regressions
-
-```bash
-cd tests && bun test --verbose
-```
-
-All tests must pass before closing the incident.
-
-### 3.4 Audit log integrity review
-
-For any batch window where the HMAC check was inactive:
-
-- OE Dashboard → **Audit Logs** → fetch the affected partner and time range.
-- OE Dashboard → **Theft Reports** → check whether any HIGH/CRITICAL reports were filed for that window.
-- If theft reports exist for the suspect window, treat the underlying query records as unverified — they may have been replaced with benign decoys.
-- Notify the affected partner to re-submit authoritative logs for the suspect window if possible.
-
-### 3.5 Document the incident
+### 3.3 Document the incident
 
 Record in the incident report:
 
