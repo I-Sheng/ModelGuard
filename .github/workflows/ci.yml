@@ -56,8 +56,21 @@ jobs:
 
       - name: Create .env from secrets
         run: |
-          cat << 'EOF' >> .env
-          ${{secrets.ENV_FILE}}
+          cat > .env <<EOF
+          MINIO_ROOT_USER=${{ secrets.MINIO_ROOT_USER }}
+          MINIO_ROOT_PASSWORD=${{ secrets.MINIO_ROOT_PASSWORD }}
+          MINIO_ACCESS_KEY=${{ secrets.MINIO_ROOT_USER }}
+          MINIO_SECRET_KEY=${{ secrets.MINIO_ROOT_PASSWORD }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+          BATCH_HMAC_SECRET=${{ secrets.BATCH_HMAC_SECRET }}
+          OE_ADMIN_USER=${{ secrets.OE_ADMIN_USER }}
+          OE_ADMIN_PASSWORD=${{ secrets.OE_ADMIN_PASSWORD }}
+          ANALYST1=analyst1
+          ANALYST1_PASSWORD=${{ secrets.ANALYST1_PASSWORD }}
+          PARTNER1=partner1
+          PARTNER1_PASSWORD=${{ secrets.PARTNER1_PASSWORD }}
+          ADMIN_USER=admin
+          ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
           EOF
 
       - name: Start stack
