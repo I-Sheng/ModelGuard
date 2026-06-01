@@ -149,6 +149,8 @@ All tests must pass before closing the incident.
 
 ### 3.2 Lift the suspension when investigation is complete
 
+Before lifting the suspension, review the audit logs for the partner's recent activity to determine whether the forged submissions were deliberate or a client-side integration error. Check for a pattern of repeated signature failures, whether only specific `api_user` values were targeted, and whether any HIGH/CRITICAL detections were suppressed during the window. If the submissions appear intentional or the partner cannot provide a credible explanation, escalate before reinstating access.
+
 Once the user's account has been investigated and cleared:
 
 ```bash
