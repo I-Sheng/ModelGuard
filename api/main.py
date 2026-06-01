@@ -69,9 +69,11 @@ JWT_ALGORITHM      = "HS256"
 JWT_EXPIRE_MINUTES = 60
 
 _USERS: dict[str, dict] = {
-    "analyst1": {"password": os.getenv("ANALYST1_PASSWORD", "analyst_password"), "role": "analyst"},
-    "partner1": {"password": os.getenv("PARTNER1_PASSWORD", "partner_password"), "role": "partner"},
-    "admin":    {"password": os.getenv("ADMIN_PASSWORD",    "admin_password"),   "role": "admin"},
+    "analyst1":    {"password": os.getenv("ANALYST1_PASSWORD",    "analyst_password"),    "role": "analyst"},
+    "partner1":    {"password": os.getenv("PARTNER1_PASSWORD",    "partner_password"),    "role": "partner"},
+    "admin":       {"password": os.getenv("ADMIN_PASSWORD",       "admin_password"),      "role": "admin"},
+    "demo-partner":{"password": os.getenv("DEMO_PARTNER_PASSWORD","demo_partner_password"),"role": "partner"},
+    "bad-actor":   {"password": os.getenv("BAD_ACTOR_PASSWORD",   "bad_actor_password"),  "role": "partner"},
 }
 _HASHED_USERS = {
     u: {"hashed_password": _bcrypt.hashpw(v["password"].encode(), _bcrypt.gensalt()), "role": v["role"]}
@@ -119,6 +121,13 @@ _PARTNER    = require_role("partner", "admin")
 # ---------------------------------------------------------------------------
 BATCH_HMAC_SECRET = os.getenv("BATCH_HMAC_SECRET", "")
 
+# API users whose batch submissions have been suspended by an admin.
+# Populated at runtime via POST /admin/users/{username}/suspend.
+_SUSPENDED_USERS: set[str] = set()
+
+# In-memory log of HMAC signature failures for operator visibility.
+_HMAC_FAILURES: list[dict] = []
+
 
 async def verify_batch_signature(request: Request) -> None:
     if not BATCH_HMAC_SECRET:
@@ -131,6 +140,29 @@ async def verify_batch_signature(request: Request) -> None:
         BATCH_HMAC_SECRET.encode(), body, hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(sig_header, expected):
+        # Emit structured log so operators can identify the caller before deciding to suspend.
+        try:
+            partner_id = json.loads(body).get("partner_id", "unknown")
+        except Exception:
+            partner_id = "unknown"
+        auth = request.headers.get("Authorization", "")
+        api_user = "unknown"
+        if auth.startswith("Bearer "):
+            try:
+                payload = jwt.decode(auth[7:], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                api_user = payload.get("sub", "unknown")
+            except Exception:
+                pass
+        logger.warning(
+            "HMAC_SIGNATURE_FAILURE partner_id=%s api_user=%s",
+            partner_id,
+            api_user,
+        )
+        _HMAC_FAILURES.append({
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
+            "partner_id": partner_id,
+            "api_user":   api_user,
+        })
         raise HTTPException(status_code=401, detail="Invalid batch signature")
 
 # ---------------------------------------------------------------------------
@@ -542,6 +574,49 @@ async def partner_activity(_user: dict = Depends(_ANY_AUTHED)):
 
 
 # ---------------------------------------------------------------------------
+# Partner suspension — admin only
+# ---------------------------------------------------------------------------
+_ADMIN = require_role("admin")
+
+
+@app.post("/admin/users/{username}/suspend", tags=["admin"])
+async def suspend_user(username: str, _user: dict = Depends(_ADMIN)):
+    """Suspend an API user: all future /batch/analyze submissions will be rejected with 403."""
+    _SUSPENDED_USERS.add(username)
+    logger.warning(
+        "USER_SUSPENDED username=%s admin=%s",
+        username,
+        _user["username"],
+    )
+    return {"username": username, "status": "suspended"}
+
+
+@app.delete("/admin/users/{username}/suspend", tags=["admin"])
+async def unsuspend_user(username: str, _user: dict = Depends(_ADMIN)):
+    """Lift a user suspension, allowing them to submit batches again."""
+    _SUSPENDED_USERS.discard(username)
+    logger.info(
+        "USER_UNSUSPENDED username=%s admin=%s",
+        username,
+        _user["username"],
+    )
+    return {"username": username, "status": "active"}
+
+
+@app.get("/admin/users/suspended", tags=["admin"])
+async def list_suspended_users(_user: dict = Depends(_ADMIN)):
+    """List all currently suspended API usernames."""
+    return {"suspended_users": sorted(_SUSPENDED_USERS)}
+
+
+@app.get("/admin/hmac-failures", tags=["admin"])
+async def list_hmac_failures(_user: dict = Depends(_ADMIN)):
+    """Return all HMAC signature failures recorded since the last backend restart."""
+    return {"hmac_failures": _HMAC_FAILURES}
+
+
+
+# ---------------------------------------------------------------------------
 # Batch detection endpoint
 # ---------------------------------------------------------------------------
 @app.post("/batch/analyze", response_model=BatchAnalyzeResponse, tags=["detection"])
@@ -558,6 +633,14 @@ async def batch_analyze(
     Per-user behavioral features are extracted and scored by the Isolation Forest.
     Returns per-user risk scores and a batch-level risk assessment.
     """
+    if _user["username"] in _SUSPENDED_USERS:
+        logger.warning(
+            "USER_SUSPENDED_REJECTION api_user=%s partner_id=%s",
+            _user["username"],
+            req.partner_id,
+        )
+        raise HTTPException(status_code=403, detail="User is suspended")
+
     batch_id = str(uuid.uuid4())
     ts = datetime.now(timezone.utc).isoformat()
 

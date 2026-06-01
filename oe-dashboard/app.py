@@ -190,6 +190,21 @@ elif page == "Partner Activity":
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    st.divider()
+    st.subheader("⚠️ HMAC Signature Failures")
+    st.caption("Invalid batch submissions detected since last backend restart.")
+
+    failures_data = api_get("/admin/hmac-failures")
+    if failures_data:
+        failures = failures_data.get("hmac_failures", [])
+        if failures:
+            st.error(f"{len(failures)} invalid attempt(s) detected.")
+            df_failures = pd.DataFrame(failures)[["timestamp", "api_user", "partner_id"]]
+            df_failures.columns = ["Timestamp", "API User", "Partner ID"]
+            st.dataframe(df_failures, use_container_width=True)
+        else:
+            st.success("No HMAC failures recorded.")
+
 
 elif page == "Audit Logs":
     st.title("Audit Logs")
