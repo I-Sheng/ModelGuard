@@ -8,6 +8,11 @@ import * as crypto from "crypto";
 import * as dotenv from "dotenv";
 import * as path from "path";
 import { BENIGN_INPUTS, BENIGN_OUTPUTS } from "./fixtures/benign-batch";
+import {
+  VALID_HMAC_BATCH,
+  TAMPERED_BATCH,
+  FORGED_SIGNATURE,
+} from "./fixtures/hmac-batch-fixtures";
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -106,6 +111,22 @@ describe("T-01 batch HMAC signature enforcement", () => {
   test("request with correct signature is accepted", async () => {
     const res = await axios.post(`${BASE_URL}/batch/analyze`, MINIMAL_BATCH, {
       headers: { ...partnerHeaders, "X-Batch-Signature": signBatch(MINIMAL_BATCH) },
+      validateStatus: () => true,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("TAMPERED_BATCH with FORGED_SIGNATURE is rejected with 401", async () => {
+    const res = await axios.post(`${BASE_URL}/batch/analyze`, TAMPERED_BATCH, {
+      headers: { ...partnerHeaders, "X-Batch-Signature": FORGED_SIGNATURE },
+      validateStatus: () => true,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("VALID_HMAC_BATCH with correct signature is accepted with 200", async () => {
+    const res = await axios.post(`${BASE_URL}/batch/analyze`, VALID_HMAC_BATCH, {
+      headers: { ...partnerHeaders, "X-Batch-Signature": signBatch(VALID_HMAC_BATCH) },
       validateStatus: () => true,
     });
     expect(res.status).toBe(200);
