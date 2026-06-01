@@ -114,7 +114,7 @@ curl -s http://localhost:8000/admin/users/suspended \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq .
 ```
 
-Attempt a batch submission as the suspended user — it must fail with `403`:
+Attempt a batch submission as the suspended user with a **valid** signature — the HMAC check must pass first before the suspension check can fire:
 
 ```bash
 source .env
@@ -122,43 +122,18 @@ BAD_TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
   -d "username=${BAD_ACTOR}&password=${BAD_ACTOR_PASSWORD}" \
   -H "Content-Type: application/x-www-form-urlencoded" | jq -r .access_token)
 
+BODY='{"partner_id":"openai-demo","window_start":"2026-01-01T00:00:00Z","window_end":"2026-01-01T01:00:00Z","queries":[]}'
+SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "${BATCH_HMAC_SECRET}" | awk '{print $2}')"
+
 curl -s -X POST http://localhost:8000/batch/analyze \
   -H "Authorization: Bearer $BAD_TOKEN" \
   -H "Content-Type: application/json" \
-  -H "X-Batch-Signature: sha256=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899" \
-  -d '{"partner_id":"openai-demo","window_start":"2026-01-01T00:00:00Z","window_end":"2026-01-01T01:00:00Z","queries":[]}' \
+  -H "X-Batch-Signature: $SIG" \
+  -d "$BODY" \
   | jq .detail
 ```
 
 Expected: `"User is suspended"`
-
-### 2.4 Scope accepted batches from the suspect window
-
-If the HMAC check was inactive before the incident was detected, audit logs from that window are untrusted. In the backend logs, find the first unprotected submission:
-
-```bash
-docker compose logs backend | grep "POST /batch/analyze 200" | head -20
-```
-
-In OE Dashboard → **Audit Logs**: filter by `partner_id` and the suspect time window. Do not delete any records — preserve them for forensic review and note which batch IDs fall in the window.
-
-### 2.5 Restore the HMAC check if it was absent
-
-**Secret missing** — generate and set a new value:
-
-```bash
-python3 -c "import secrets; print(secrets.token_hex(32))"
-# Add the output to .env as: BATCH_HMAC_SECRET=<value>
-docker compose up -d --force-recreate backend
-```
-
-Communicate the new secret to all partner integrations — they must update their signing key.
-
-**Stale image** — rebuild and restart:
-
-```bash
-docker compose up --build -d backend
-```
 
 ---
 
