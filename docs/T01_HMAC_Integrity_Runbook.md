@@ -141,20 +141,8 @@ Expected: `"User is suspended"`
 
 ### 3.1 Confirm HMAC enforcement is active
 
-Run the T-01 security tests:
-
 ```bash
-cd tests && bun test security.test.ts --verbose
-```
-
-Both assertions must pass:
-- `TAMPERED_BATCH` with `FORGED_SIGNATURE` → `401`
-- `VALID_HMAC_BATCH` with correct signature → `200`
-
-Then run the full test suite for regressions:
-
-```bash
-cd tests && bun test --verbose
+cd tests && bun test
 ```
 
 All tests must pass before closing the incident.
