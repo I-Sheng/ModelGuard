@@ -5,7 +5,7 @@
 - Status: MVP — Redesign v2
 - Version: 0.3.0-oss
 - Repository: I-Sheng/ModelGuard
-- Last Updated: 2026-05-03
+- Last Updated: 2026-06-02
 
 ---
 
@@ -23,6 +23,8 @@ Because ModelGuard's detection output is only as trustworthy as the input batch,
 **Component**: Backend API  
 **STRIDE**: Tampering, Spoofing, Repudiation
 
+**Mitigation (implemented)**: `POST /batch/analyze` now requires an HMAC-SHA256 signature over the raw request body, verified server-side against `BATCH_HMAC_SECRET`. Requests with a missing or invalid `X-Batch-Signature` header are rejected with HTTP 403. Signature failures are logged to an in-memory audit list accessible at `GET /admin/hmac-failures`. Operators can suspend a misbehaving API user via `POST /admin/users/{username}/suspend` and reverse it with `DELETE /admin/users/{username}/suspend`. See `docs/T01_HMAC_Integrity_Runbook.md` for the full response procedure.
+
 ---
 
 ### T-02 — Data Tampering: Theft Reports Derived from Mutable Audit Logs (High)
@@ -32,6 +34,8 @@ Theft reports stored in `modelguard-reports` are generated from batch analysis r
 **Component**: MinIO storage, Backend API  
 **STRIDE**: Tampering, Repudiation
 
+**Mitigation (implemented)**: Both `modelguard-auditlog` and `modelguard-reports` buckets are now provisioned with MinIO object locking (`mc mb --with-lock`). Objects written to these buckets cannot be modified or deleted once stored, making the audit trail append-only.
+
 ---
 
 ### T-03 — DDoS Attack: No Rate Limit on Any Endpoint (Medium)
@@ -40,3 +44,5 @@ No rate-limiting middleware exists on any endpoint. An unauthenticated or authen
 
 **Component**: Backend API, MinIO storage  
 **STRIDE**: Denial of Service
+
+**Mitigation (implemented)**: `slowapi` rate-limiting middleware is now applied at the route level. `/auth/login` is capped at 10 requests/minute per IP to prevent credential stuffing. `/batch/analyze` is capped at 60 requests/minute per IP to bound MinIO write volume. Requests exceeding either limit receive HTTP 429.
